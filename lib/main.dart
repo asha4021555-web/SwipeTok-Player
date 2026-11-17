@@ -505,12 +505,20 @@ class _VideoHomePageState extends State<VideoHomePage>
 
     final dy = details.offsetFromOrigin.dy;
 
-    if (dy <= -60) {
+    if (dy <= -90) {
       _setTemporarySpeed(8.0);
-    } else if (dy <= -25) {
+    } else if (dy <= -50) {
       _setTemporarySpeed(4.0);
-    } else if (dy >= 25) {
+    } else if (dy <= -20) {
+      _setTemporarySpeed(2.0);
+    } else if (dy >= 110) {
+      _setTemporarySpeed(0.5);
+    } else if (dy >= 80) {
+      _setTemporarySpeed(0.75);
+    } else if (dy >= 50) {
       _setTemporarySpeed(1.0);
+    } else if (dy >= 20) {
+      _setTemporarySpeed(1.5);
     } else {
       _setTemporarySpeed(2.0);
     }
@@ -531,6 +539,55 @@ class _VideoHomePageState extends State<VideoHomePage>
     _setTemporarySpeed(_speed);
 
     if (mounted) setState(() {});
+  }
+
+  Future<void> _showVideoList() async {
+    if (_locked || _isPipMode || _videos.isEmpty) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF202020),
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: SizedBox(
+          height: MediaQuery.of(sheetContext).size.height * 0.7,
+          child: Column(
+            children: [
+              const Padding(
+                padding: EdgeInsets.all(16),
+                child: Text(
+                  'قائمة الفيديوهات',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  itemCount: _videos.length,
+                  itemBuilder: (context, index) => ListTile(
+                    leading: Icon(
+                      index == _currentIndex ? Icons.play_circle_fill : Icons.play_circle_outline,
+                      color: index == _currentIndex ? Colors.greenAccent : Colors.white70,
+                    ),
+                    title: Text(
+                      _videos[index].name,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    selected: index == _currentIndex,
+                    onTap: () {
+                      Navigator.pop(sheetContext);
+                      if (index == _currentIndex) return;
+                      _pageController.jumpToPage(index);
+                      _openVideo(index);
+                    },
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 
   Future<void> _enterPictureInPicture() async {
@@ -895,6 +952,15 @@ class _VideoHomePageState extends State<VideoHomePage>
                     ),
 
                   if (!_locked && !_isPipMode) ...[
+                    Positioned(
+                      right: 8,
+                      top: MediaQuery.of(context).size.height * 0.42,
+                      child: IconButton.filledTonal(
+                        onPressed: _showVideoList,
+                        icon: const Icon(Icons.more_vert),
+                        tooltip: 'قائمة الفيديوهات',
+                      ),
+                    ),
                     Positioned(
                       top: 8,
                       right: 8,
