@@ -38,23 +38,17 @@ class _VideoHomePageState extends State<VideoHomePage> {
   final List<SafDocumentFile> _videos = [];
 
   VideoPlayerController? _controller;
-  int? _openedFd;
+  Directory? _tempDirectory;
+  File? _currentLocalFile;
 
   int _currentIndex = 0;
+  int _openRequest = 0;
   bool _loading = false;
   String? _error;
 
   static const Set<String> _extensions = {
-    'mp4',
-    'm4v',
-    'mov',
-    'mkv',
-    'avi',
-    'webm',
-    '3gp',
-    'mpeg',
-    'mpg',
-    'ts',
+    'mp4', 'm4v', 'mov', 'mkv', 'avi',
+    'webm', '3gp', 'mpeg', 'mpg', 'ts',
   };
 
   Future<void> _pickFolder() async {
@@ -116,7 +110,7 @@ class _VideoHomePageState extends State<VideoHomePage> {
 
       setState(() {
         _loading = false;
-        _error = 'حدث خطأ أثناء قراءة المجلد: $e';
+        _error = 'تعذر قراءة المجلد: $e';
       });
     }
   }
@@ -129,60 +123,83 @@ class _VideoHomePageState extends State<VideoHomePage> {
       await oldController.dispose();
     }
 
-    final oldFd = _openedFd;
-    _openedFd = null;
+    final oldFile = _currentLocalFile;
+    _currentLocalFile = null;
 
-    if (oldFd != null) {
-      await _saf.closeFileDescriptor(oldFd);
+    if (oldFile != null && await oldFile.exists()) {
+      await oldFile.delete();
     }
   }
 
   Future<void> _openVideo(int index) async {
     if (index < 0 || index >= _videos.length) return;
 
-    await _disposeCurrentVideo();
-
-    if (!mounted) return;
-
-    setState(() {
-      _currentIndex = index;
-      _loading = true;
-      _error = null;
-    });
+    final request = ++_openRequest;
 
     try {
+      await _disposeCurrentVideo();
+
+      if (!mounted || request != _openRequest) return;
+
+      setState(() {
+        _currentIndex = index;
+        _loading = true;
+        _error = null;
+      });
+
+      _tempDirectory ??=
+          await Directory.systemTemp.createTemp('swipe_player_');
+
       final video = _videos[index];
 
-      final opened = await _saf.openFileDescriptor(
+      final safeName = video.name.replaceAll(
+        RegExp(r'[^a-zA-Z0-9._-]'),
+        '_',
+      );
+
+      final localFile = File(
+        '${_tempDirectory!.path}/${index}_$safeName',
+      );
+
+      await _saf.copyToLocalFile(
         video.uri,
-        'r',
+        localFile.path,
       );
 
-      _openedFd = opened.fd;
+      if (!mounted || request != _openRequest) {
+        if (await localFile.exists()) {
+          await localFile.delete();
+        }
+        return;
+      }
 
-      final controller = VideoPlayerController.file(
-        File(opened.path),
-      );
+      if (!await localFile.exists() ||
+          await localFile.length() == 0) {
+        throw Exception('ملف الفيديو المنسوخ فارغ أو غير موجود');
+      }
 
+      _currentLocalFile = localFile;
+
+      final controller = VideoPlayerController.file(localFile);
       _controller = controller;
 
       await controller.initialize();
       await controller.setLooping(true);
       await controller.play();
 
-      if (!mounted || _controller != controller) return;
+      if (!mounted || request != _openRequest) return;
 
       setState(() {
         _loading = false;
       });
     } catch (e) {
-      await _disposeCurrentVideo();
+      if (!mounted || request != _openRequest) return;
 
-      if (!mounted) return;
+      await _disposeCurrentVideo();
 
       setState(() {
         _loading = false;
-        _error = 'تعذر تشغيل هذا الفيديو.';
+        _error = 'تعذر تشغيل الفيديو: $e';
       });
     }
   }
@@ -205,22 +222,20 @@ class _VideoHomePageState extends State<VideoHomePage> {
 
   @override
   void dispose() {
+    _openRequest++;
     _pageController.dispose();
 
     final controller = _controller;
-    final fd = _openedFd;
+    final tempDirectory = _tempDirectory;
 
     _controller = null;
-    _openedFd = null;
 
     if (controller != null) {
-      controller.dispose().then((_) {
-        if (fd != null) {
-          _saf.closeFileDescriptor(fd);
-        }
+      controller.dispose().whenComplete(() {
+        tempDirectory?.delete(recursive: true);
       });
-    } else if (fd != null) {
-      _saf.closeFileDescriptor(fd);
+    } else {
+      tempDirectory?.delete(recursive: true);
     }
 
     super.dispose();
