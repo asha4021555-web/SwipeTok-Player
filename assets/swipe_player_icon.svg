@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+<defs>
+ <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#070923"/><stop offset=".52" stop-color="#061c50"/><stop offset="1" stop-color="#18052f"/></linearGradient>
+ <linearGradient id="edge" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#d000ff"/><stop offset=".48" stop-color="#00cfff"/><stop offset="1" stop-color="#8b22ff"/></linearGradient>
+ <linearGradient id="play" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#11f2ff"/><stop offset="1" stop-color="#1452ff"/></linearGradient>
+ <linearGradient id="gold" x1="0" y1="0" x2="0" y2="1"><stop stop-color="#fff36a"/><stop offset="1" stop-color="#ff9d00"/></linearGradient>
+ <filter id="glow"><feGaussianBlur stdDeviation="18" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+ <filter id="shadow"><feGaussianBlur stdDeviation="9"/></filter>
+</defs>
+<rect x="18" y="18" width="988" height="988" rx="190" fill="#02030c" stroke="url(#edge)" stroke-width="18"/>
+<rect x="38" y="38" width="948" height="948" rx="170" fill="url(#bg)"/>
+<path d="M75 370 C180 210 305 175 420 250 L470 315 C330 245 220 300 105 450Z" fill="none" stroke="#c9eaff" stroke-width="25" opacity=".9"/>
+<path d="M80 430 C190 560 325 570 445 465" fill="none" stroke="#8bdfff" stroke-width="20" opacity=".8"/>
+<g fill="#061027" stroke="#d8edff" stroke-width="12" opacity=".95">
+ <rect x="95" y="245" width="58" height="28" rx="5" transform="rotate(-28 95 245)"/><rect x="165" y="208" width="58" height="28" rx="5" transform="rotate(-20 165 208)"/><rect x="240" y="185" width="58" height="28" rx="5" transform="rotate(-10 240 185)"/>
+</g>
+<path d="M390 185 L730 390 Q780 420 730 455 L390 660 Q330 695 330 625 L330 220 Q330 150 390 185Z" fill="#07163d" stroke="#eaf6ff" stroke-width="28" filter="url(#glow)"/>
+<path d="M420 265 L665 410 L420 565Z" fill="url(#play)" stroke="#25dfff" stroke-width="12"/>
+<path d="M630 190 C745 105 880 150 900 255" fill="none" stroke="#08dfff" stroke-width="22" stroke-linecap="round" filter="url(#glow)"/>
+<path d="M865 205 L930 270 L835 285Z" fill="#fff"/>
+<path d="M720 535 Q780 470 840 525 L905 600 Q945 650 905 690 L860 735 Q825 765 785 730 L690 640 Q655 605 690 570Z" fill="#f5f8ff" stroke="#05091c" stroke-width="24"/>
+<path d="M725 575 L790 650" stroke="#14264e" stroke-width="18" stroke-linecap="round"/>
+<text x="512" y="790" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="130" font-weight="900" font-style="italic" fill="#fff" stroke="#050714" stroke-width="18" paint-order="stroke">Swipe</text>
+<text x="512" y="905" text-anchor="middle" font-family="DejaVu Sans,Arial,sans-serif" font-size="125" font-weight="900" font-style="italic" fill="url(#gold)" stroke="#090714" stroke-width="18" paint-order="stroke">Player</text>
+<path d="M170 940 Q510 850 850 930" fill="none" stroke="url(#gold)" stroke-width="15"/>
+</svg>
