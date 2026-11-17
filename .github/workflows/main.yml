@@ -33,6 +33,121 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name swipe_player .
 
+      - name: Configure Android Picture-in-Picture
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          manifest = Path("android/app/src/main/AndroidManifest.xml")
+          content = manifest.read_text()
+
+          if 'android:supportsPictureInPicture="true"' not in content:
+              pattern = r'(<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*)(>)'
+              content, count = re.subn(
+                  pattern,
+                  r'\1 android:supportsPictureInPicture="true"\2',
+                  content,
+                  count=1,
+                  flags=re.S
+              )
+              if count != 1:
+                  raise SystemExit("Could not find MainActivity in AndroidManifest.xml")
+
+          manifest.write_text(content)
+
+          kotlin_files = list(
+              Path("android/app/src/main/kotlin").rglob("MainActivity.kt")
+          )
+
+          if not kotlin_files:
+              raise SystemExit("MainActivity.kt was not found")
+
+          activity = kotlin_files[0]
+          old_content = activity.read_text()
+
+          match = re.search(
+              r'^\s*package\s+([^\s]+)',
+              old_content,
+              re.M
+          )
+
+          if not match:
+              raise SystemExit("Could not detect Kotlin package name")
+
+          package_name = match.group(1)
+
+          new_content = f'''package {package_name}
+
+          import android.app.PictureInPictureParams
+          import android.content.res.Configuration
+          import android.os.Build
+          import android.util.Rational
+          import io.flutter.embedding.android.FlutterActivity
+          import io.flutter.embedding.engine.FlutterEngine
+          import io.flutter.plugin.common.MethodChannel
+
+          class MainActivity : FlutterActivity() {{
+              private val pipChannelName = "swipe_player/pip"
+              private var pipChannel: MethodChannel? = null
+
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+                  super.configureFlutterEngine(flutterEngine)
+
+                  pipChannel = MethodChannel(
+                      flutterEngine.dartExecutor.binaryMessenger,
+                      pipChannelName
+                  )
+
+                  pipChannel?.setMethodCallHandler {{ call, result ->
+                      if (call.method == "enterPip") {{
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
+                              try {{
+                                  val width = call.argument<Int>("width") ?: 16
+                                  val height = call.argument<Int>("height") ?: 9
+
+                                  val params = PictureInPictureParams.Builder()
+                                      .setAspectRatio(Rational(width, height))
+                                      .build()
+
+                                  result.success(enterPictureInPictureMode(params))
+                              }} catch (e: Exception) {{
+                                  result.error("PIP_ERROR", e.message, null)
+                              }}
+                          }} else {{
+                              result.error(
+                                  "UNSUPPORTED",
+                                  "Picture-in-picture requires Android 8.0 or later.",
+                                  null
+                              )
+                          }}
+                      }} else {{
+                          result.notImplemented()
+                      }}
+                  }}
+              }}
+
+              override fun onPictureInPictureModeChanged(
+                  isInPictureInPictureMode: Boolean,
+                  newConfig: Configuration
+              ) {{
+                  super.onPictureInPictureModeChanged(
+                      isInPictureInPictureMode,
+                      newConfig
+                  )
+
+                  pipChannel?.invokeMethod(
+                      "pipChanged",
+                      mapOf("isInPipMode" to isInPictureInPictureMode)
+                  )
+              }}
+          }}
+          '''
+
+          activity.write_text(new_content)
+          print("Picture-in-Picture Android configuration added.")
+          PY
+
       - name: Install dependencies
         run: flutter pub get
 
