@@ -1,8 +1,12 @@
 
+import 'dart:async';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:saf/saf.dart';
+import 'package:screen_brightness/screen_brightness.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:video_player/video_player.dart';
 
 void main() {
@@ -31,40 +35,131 @@ class VideoHomePage extends StatefulWidget {
   State<VideoHomePage> createState() => _VideoHomePageState();
 }
 
-class _VideoHomePageState extends State<VideoHomePage> {
+class _VideoHomePageState extends State<VideoHomePage>
+    with WidgetsBindingObserver {
   final Saf _saf = Saf();
   final PageController _pageController = PageController();
-
   final List<SafDocumentFile> _videos = [];
 
   VideoPlayerController? _controller;
+  SharedPreferences? _prefs;
   Directory? _tempDirectory;
   File? _currentLocalFile;
 
   int _currentIndex = 0;
   int _openRequest = 0;
+  int _lastCompletedIndex = -1;
+
   bool _loading = false;
+  bool _locked = false;
+  bool _repeat = false;
+  bool _autoplay = true;
+  bool _savePosition = true;
+  bool _showResumePrompt = false;
+  bool _coverMode = false;
+
+  double _volume = 1.0;
+  double _speed = 1.0;
+  double _brightness = 1.0;
+  double _savedPosition = 0;
+
   String? _error;
+  String? _folderUri;
+  String? _lastVideoUri;
+
+  DateTime _lastProgressSave = DateTime.fromMillisecondsSinceEpoch(0);
+  Timer? _unlockTimer;
+  bool _unlocking = false;
 
   static const Set<String> _extensions = {
     'mp4', 'm4v', 'mov', 'mkv', 'avi',
     'webm', '3gp', 'mpeg', 'mpg', 'ts',
   };
 
-  Future<void> _pickFolder() async {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _initializeApp();
+  }
+
+  Future<void> _initializeApp() async {
     try {
-      setState(() {
-        _loading = true;
-        _error = null;
-      });
+      _prefs = await SharedPreferences.getInstance();
 
-      final folder = await _saf.pickDirectory();
+      _folderUri = _prefs!.getString('folderUri');
+      _lastVideoUri = _prefs!.getString('lastVideoUri');
+      _savedPosition =
+          _prefs!.getDouble('lastPosition') ?? 0;
 
-      if (folder == null) {
-        if (mounted) setState(() => _loading = false);
-        return;
+      _repeat = _prefs!.getBool('repeat') ?? false;
+      _autoplay = _prefs!.getBool('autoplay') ?? true;
+      _savePosition =
+          _prefs!.getBool('savePosition') ?? true;
+      _volume = _prefs!.getDouble('volume') ?? 1.0;
+      _speed = _prefs!.getDouble('speed') ?? 1.0;
+      _brightness = _prefs!.getDouble('brightness') ?? 1.0;
+      _coverMode = _prefs!.getBool('coverMode') ?? false;
+
+      await ScreenBrightness.instance
+          .setApplicationScreenBrightness(_brightness);
+
+      if (_folderUri != null) {
+        final permissions = await _saf.persistedPermissions();
+        final hasPermission = permissions.any(
+          (p) => p.uri == _folderUri && p.read,
+        );
+
+        if (hasPermission) {
+          final folder = await _saf.stat(_folderUri!);
+          if (folder != null && folder.isDir) {
+            await _loadFolder(folder, restoring: true);
+            return;
+          }
+        }
       }
 
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'اختَر مجلد الفيديوهات للبدء.';
+        });
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _loading = false;
+          _error = 'تعذر استعادة المجلد المحفوظ: $e';
+        });
+      }
+    }
+  }
+
+  Future<void> _pickFolder() async {
+    if (_loading) return;
+
+    try {
+      final folder = await _saf.pickDirectory();
+
+      if (folder == null) return;
+
+      await _loadFolder(folder);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = 'تعذر اختيار المجلد: $e');
+    }
+  }
+
+  Future<void> _loadFolder(
+    SafDocumentFile folder, {
+    bool restoring = false,
+  }) async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+
+    try {
       final foundVideos = <SafDocumentFile>[];
 
       await for (final entry in _saf.walk(folder.uri)) {
@@ -93,21 +188,45 @@ class _VideoHomePageState extends State<VideoHomePage> {
 
       await _disposeCurrentVideo();
 
-      if (!mounted) return;
+      _videos
+        ..clear()
+        ..addAll(foundVideos);
+
+      _folderUri = folder.uri;
+
+      await _prefs?.setString('folderUri', folder.uri);
+
+      int startIndex = 0;
+
+      if (restoring && _lastVideoUri != null) {
+        final foundIndex = foundVideos.indexWhere(
+          (v) => v.uri == _lastVideoUri,
+        );
+
+        if (foundIndex >= 0) {
+          startIndex = foundIndex;
+          _showResumePrompt = _savedPosition > 0;
+        }
+      } else {
+        _lastVideoUri = null;
+        _savedPosition = 0;
+        await _prefs?.remove('lastVideoUri');
+        await _prefs?.setDouble('lastPosition', 0);
+      }
 
       setState(() {
-        _videos
-          ..clear()
-          ..addAll(foundVideos);
-        _currentIndex = 0;
+        _currentIndex = startIndex;
         _loading = false;
         _error = null;
       });
 
-      await _openVideo(0);
+      if (_pageController.hasClients) {
+        _pageController.jumpToPage(startIndex);
+      }
+
+      await _openVideo(startIndex);
     } catch (e) {
       if (!mounted) return;
-
       setState(() {
         _loading = false;
         _error = 'تعذر قراءة المجلد: $e';
@@ -120,6 +239,7 @@ class _VideoHomePageState extends State<VideoHomePage> {
     _controller = null;
 
     if (oldController != null) {
+      oldController.removeListener(_videoListener);
       await oldController.dispose();
     }
 
@@ -175,7 +295,7 @@ class _VideoHomePageState extends State<VideoHomePage> {
 
       if (!await localFile.exists() ||
           await localFile.length() == 0) {
-        throw Exception('ملف الفيديو المنسوخ فارغ أو غير موجود');
+        throw Exception('ملف الفيديو فارغ أو غير موجود');
       }
 
       _currentLocalFile = localFile;
@@ -184,14 +304,22 @@ class _VideoHomePageState extends State<VideoHomePage> {
       _controller = controller;
 
       await controller.initialize();
-      await controller.setLooping(true);
-      await controller.play();
+      await controller.setLooping(_repeat);
+      await controller.setVolume(_volume);
+      await controller.setPlaybackSpeed(_speed);
+
+      controller.addListener(_videoListener);
 
       if (!mounted || request != _openRequest) return;
 
-      setState(() {
-        _loading = false;
-      });
+      setState(() => _loading = false);
+
+      if (_showResumePrompt && video.uri == _lastVideoUri) {
+        _showResumePrompt = false;
+        await _askResume(controller);
+      } else {
+        await controller.play();
+      }
     } catch (e) {
       if (!mounted || request != _openRequest) return;
 
@@ -204,24 +332,365 @@ class _VideoHomePageState extends State<VideoHomePage> {
     }
   }
 
-  void _togglePlayback() {
+  Future<void> _askResume(
+    VideoPlayerController controller,
+  ) async {
+    final choice = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => AlertDialog(
+        title: const Text('استكمال المشاهدة'),
+        content: const Text(
+          'هل تريد الاستمرار من آخر ثانية وصلت إليها؟',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('البدء من جديد'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('استمرار'),
+          ),
+        ],
+      ),
+    );
+
+    if (!mounted || !controller.value.isInitialized) return;
+
+    if (choice == true) {
+      final position = Duration(
+        milliseconds: _savedPosition.toInt(),
+      );
+
+      await controller.seekTo(position);
+    } else {
+      await controller.seekTo(Duration.zero);
+    }
+
+    await controller.play();
+  }
+
+  void _videoListener() {
     final controller = _controller;
 
     if (controller == null || !controller.value.isInitialized) {
       return;
     }
 
-    setState(() {
-      if (controller.value.isPlaying) {
-        controller.pause();
-      } else {
-        controller.play();
+    final value = controller.value;
+
+    if (_savePosition) {
+      final now = DateTime.now();
+
+      if (now.difference(_lastProgressSave).inSeconds >= 2) {
+        _lastProgressSave = now;
+        _saveProgress();
+      }
+    }
+
+    if (!value.isPlaying &&
+        value.isCompleted &&
+        !_repeat &&
+        _autoplay &&
+        _lastCompletedIndex != _currentIndex) {
+      _lastCompletedIndex = _currentIndex;
+
+      if (_currentIndex + 1 < _videos.length) {
+        _pageController.nextPage(
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeInOut,
+        );
+      }
+    }
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _saveProgress() async {
+    final controller = _controller;
+
+    if (!_savePosition ||
+        controller == null ||
+        !controller.value.isInitialized ||
+        _videos.isEmpty) {
+      return;
+    }
+
+    _lastVideoUri = _videos[_currentIndex].uri;
+    _savedPosition =
+        controller.value.position.inMilliseconds.toDouble();
+
+    await _prefs?.setString('lastVideoUri', _lastVideoUri!);
+    await _prefs?.setDouble('lastPosition', _savedPosition);
+  }
+
+  void _togglePlayback() {
+    if (_locked) return;
+
+    final controller = _controller;
+
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
+    if (controller.value.isPlaying) {
+      controller.pause();
+    } else {
+      controller.play();
+    }
+
+    setState(() {});
+  }
+
+  Future<void> _seekTo(double milliseconds) async {
+    final controller = _controller;
+
+    if (controller == null || !controller.value.isInitialized) return;
+
+    await controller.seekTo(
+      Duration(milliseconds: milliseconds.toInt()),
+    );
+  }
+
+  String _formatTime(Duration duration) {
+    final total = duration.inSeconds;
+    final hours = total ~/ 3600;
+    final minutes = (total % 3600) ~/ 60;
+    final seconds = total % 60;
+
+    if (hours > 0) {
+      return '$hours:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+    }
+
+    return '$minutes:${seconds.toString().padLeft(2, '0')}';
+  }
+
+  void _lockChildren() {
+    setState(() => _locked = true);
+  }
+
+  void _startUnlock() {
+    if (!_locked || _unlocking) return;
+
+    _unlocking = true;
+
+    _unlockTimer = Timer(const Duration(seconds: 3), () {
+      if (mounted && _unlocking) {
+        setState(() {
+          _locked = false;
+          _unlocking = false;
+        });
       }
     });
   }
 
+  void _cancelUnlock() {
+    _unlocking = false;
+    _unlockTimer?.cancel();
+  }
+
+  Future<void> _openSettings() async {
+    if (_locked) return;
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF202020),
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (context, setSheetState) {
+            Widget heading(String text) => Padding(
+              padding: const EdgeInsets.only(top: 18, bottom: 8),
+              child: Text(
+                text,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            );
+
+            Widget sliderSetting(
+              String title,
+              double value,
+              String suffix,
+              ValueChanged<double> onChanged,
+            ) {
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('$title: ${(value * 100).round()}$suffix'),
+                  Slider(
+                    value: value.clamp(0.0, 1.0),
+                    min: 0,
+                    max: 1,
+                    onChanged: onChanged,
+                  ),
+                ],
+              );
+            }
+
+            return SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(20),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Center(
+                      child: Text(
+                        'إعدادات Swipe Player',
+                        style: TextStyle(
+                          fontSize: 20,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+
+                    heading('الصورة والسطوع'),
+
+                    sliderSetting(
+                      'السطوع',
+                      _brightness,
+                      '%',
+                      (v) async {
+                        setSheetState(() => _brightness = v);
+                        await ScreenBrightness.instance
+                            .setApplicationScreenBrightness(v);
+                        await _prefs?.setDouble('brightness', v);
+                      },
+                    ),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('ملء الشاشة وقص الزوائد'),
+                      subtitle: const Text('إيقافه يعرض الفيديو كاملًا'),
+                      value: _coverMode,
+                      onChanged: (v) {
+                        setSheetState(() => _coverMode = v);
+                        setState(() {});
+                        _prefs?.setBool('coverMode', v);
+                      },
+                    ),
+
+                    const Text(
+                      'يمكن التكبير والتصغير بإصبعين على الفيديو.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+
+                    heading('الصوت والتشغيل'),
+
+                    sliderSetting(
+                      'الصوت',
+                      _volume,
+                      '%',
+                      (v) async {
+                        setSheetState(() => _volume = v);
+                        await _controller?.setVolume(v);
+                        await _prefs?.setDouble('volume', v);
+                      },
+                    ),
+
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('سرعة التشغيل'),
+                      trailing: DropdownButton<double>(
+                        value: _speed,
+                        items: [0.5, 0.75, 1.0, 1.25, 1.5, 2.0]
+                            .map(
+                              (v) => DropdownMenuItem(
+                                value: v,
+                                child: Text('${v}x'),
+                              ),
+                            )
+                            .toList(),
+                        onChanged: (v) async {
+                          if (v == null) return;
+                          setSheetState(() => _speed = v);
+                          await _controller?.setPlaybackSpeed(v);
+                          await _prefs?.setDouble('speed', v);
+                        },
+                      ),
+                    ),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('تكرار الفيديو'),
+                      value: _repeat,
+                      onChanged: (v) async {
+                        setSheetState(() => _repeat = v);
+                        await _controller?.setLooping(v);
+                        await _prefs?.setBool('repeat', v);
+                      },
+                    ),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('التشغيل التلقائي للفيديو التالي'),
+                      value: _autoplay,
+                      onChanged: (v) {
+                        setSheetState(() => _autoplay = v);
+                        _prefs?.setBool('autoplay', v);
+                      },
+                    ),
+
+                    heading('الحفظ والمجلد'),
+
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('حفظ مكان المشاهدة'),
+                      value: _savePosition,
+                      onChanged: (v) {
+                        setSheetState(() => _savePosition = v);
+                        _prefs?.setBool('savePosition', v);
+                        if (!v) {
+                          _prefs?.setDouble('lastPosition', 0);
+                        }
+                      },
+                    ),
+
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.folder_open),
+                      title: const Text('تغيير مجلد الفيديوهات'),
+                      onTap: () {
+                        Navigator.pop(sheetContext);
+                        _pickFolder();
+                      },
+                    ),
+
+                    const Divider(),
+
+                    const Text(
+                      'قفل الأطفال: اضغط علامة القفل أثناء المشاهدة. '
+                      'لفكه اضغط عليها باستمرار لمدة 3 ثوانٍ.',
+                      style: TextStyle(color: Colors.white70),
+                    ),
+
+                    const SizedBox(height: 18),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive ||
+        state == AppLifecycleState.detached) {
+      _saveProgress();
+    }
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _unlockTimer?.cancel();
     _openRequest++;
     _pageController.dispose();
 
@@ -231,6 +700,7 @@ class _VideoHomePageState extends State<VideoHomePage> {
     _controller = null;
 
     if (controller != null) {
+      controller.removeListener(_videoListener);
       controller.dispose().whenComplete(() {
         tempDirectory?.delete(recursive: true);
       });
@@ -253,40 +723,61 @@ class _VideoHomePageState extends State<VideoHomePage> {
             : Stack(
                 fit: StackFit.expand,
                 children: [
-                  PageView.builder(
-                    controller: _pageController,
-                    scrollDirection: Axis.vertical,
-                    itemCount: _videos.length,
-                    onPageChanged: _openVideo,
-                    itemBuilder: (context, index) {
-                      if (index != _currentIndex ||
-                          controller == null ||
-                          !controller.value.isInitialized) {
-                        return const ColoredBox(
-                          color: Colors.black,
-                        );
-                      }
+                  AbsorbPointer(
+                    absorbing: _locked,
+                    child: PageView.builder(
+                      controller: _pageController,
+                      scrollDirection: Axis.vertical,
+                      itemCount: _videos.length,
+                      onPageChanged: (index) {
+                        _lastCompletedIndex = -1;
+                        _openVideo(index);
+                      },
+                      itemBuilder: (context, index) {
+                        if (index != _currentIndex ||
+                            controller == null ||
+                            !controller.value.isInitialized) {
+                          return const ColoredBox(
+                            color: Colors.black,
+                          );
+                        }
 
-                      final size = controller.value.size;
+                        final size = controller.value.size;
 
-                      return GestureDetector(
-                        onTap: _togglePlayback,
-                        child: Center(
-                          child: AspectRatio(
-                            aspectRatio:
-                                size.width > 0 && size.height > 0
-                                    ? size.width / size.height
-                                    : 9 / 16,
-                            child: VideoPlayer(controller),
+                        return GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _togglePlayback,
+                          child: Center(
+                            child: InteractiveViewer(
+                              key: ValueKey(index),
+                              minScale: 1,
+                              maxScale: 4,
+                              panEnabled: true,
+                              scaleEnabled: true,
+                              child: SizedBox.expand(
+                                child: FittedBox(
+                                  fit: _coverMode
+                                      ? BoxFit.cover
+                                      : BoxFit.contain,
+                                  child: SizedBox(
+                                    width: size.width,
+                                    height: size.height,
+                                    child: VideoPlayer(controller),
+                                  ),
+                                ),
+                              ),
+                            ),
                           ),
-                        ),
-                      );
-                    },
+                        );
+                      },
+                    ),
                   ),
+
                   if (_loading)
                     const Center(
                       child: CircularProgressIndicator(),
                     ),
+
                   if (_error != null)
                     Center(
                       child: Padding(
@@ -294,42 +785,135 @@ class _VideoHomePageState extends State<VideoHomePage> {
                         child: Text(
                           _error!,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(
-                            color: Colors.white,
+                          style: const TextStyle(color: Colors.white),
+                        ),
+                      ),
+                    ),
+
+                  if (!_locked) ...[
+                    Positioned(
+                      top: 8,
+                      right: 8,
+                      child: IconButton.filledTonal(
+                        onPressed: _openSettings,
+                        icon: const Icon(Icons.settings),
+                        tooltip: 'الإعدادات',
+                      ),
+                    ),
+
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: IconButton.filledTonal(
+                        onPressed: _lockChildren,
+                        icon: const Icon(Icons.lock_open),
+                        tooltip: 'قفل الأطفال',
+                      ),
+                    ),
+
+                    if (controller != null &&
+                        controller.value.isInitialized)
+                      Positioned(
+                        bottom: 8,
+                        left: 12,
+                        right: 12,
+                        child: ValueListenableBuilder<VideoPlayerValue>(
+                          valueListenable: controller,
+                          builder: (context, value, child) {
+                            final duration = value.duration;
+                            final position = value.position;
+                            final totalMs =
+                                duration.inMilliseconds.toDouble();
+                            final currentMs =
+                                position.inMilliseconds.toDouble();
+                            final remaining = duration - position;
+
+                            return Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Row(
+                                  mainAxisAlignment:
+                                      MainAxisAlignment.spaceBetween,
+                                  children: [
+                                    Text(_formatTime(position)),
+                                    Text(
+                                      '-${_formatTime(remaining.isNegative ? Duration.zero : remaining)}',
+                                    ),
+                                    Text(_formatTime(duration)),
+                                  ],
+                                ),
+                                Slider(
+                                  value: totalMs > 0
+                                      ? currentMs.clamp(0, totalMs)
+                                      : 0,
+                                  min: 0,
+                                  max: totalMs > 0 ? totalMs : 1,
+                                  onChanged: totalMs > 0
+                                      ? _seekTo
+                                      : null,
+                                ),
+                                Text(
+                                  '${_currentIndex + 1} / ${_videos.length}  •  ${_videos[_currentIndex].name}',
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  textAlign: TextAlign.center,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    shadows: [
+                                      Shadow(
+                                        blurRadius: 8,
+                                        color: Colors.black,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+
+                  if (_locked)
+                    Positioned.fill(
+                      child: ColoredBox(
+                        color: Colors.black.withValues(alpha: 0.12),
+                        child: Center(
+                          child: GestureDetector(
+                            onLongPressStart: (_) => _startUnlock(),
+                            onLongPressEnd: (_) => _cancelUnlock(),
+                            onLongPressCancel: _cancelUnlock,
+                            child: Container(
+                              padding: const EdgeInsets.all(24),
+                              decoration: const BoxDecoration(
+                                color: Colors.black87,
+                                shape: BoxShape.circle,
+                              ),
+                              child: Column(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  const Icon(
+                                    Icons.lock,
+                                    size: 48,
+                                    color: Colors.white,
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Text(
+                                    _unlocking
+                                        ? 'استمر في الضغط...'
+                                        : 'مقفل',
+                                  ),
+                                  const Text(
+                                    'اضغط 3 ثوانٍ لفك القفل',
+                                    style: TextStyle(fontSize: 11),
+                                  ),
+                                ],
+                              ),
+                            ),
                           ),
                         ),
                       ),
                     ),
-                  Positioned(
-                    top: 12,
-                    right: 12,
-                    child: IconButton.filledTonal(
-                      onPressed: _pickFolder,
-                      icon: const Icon(Icons.folder_open),
-                      tooltip: 'اختيار مجلد',
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 20,
-                    left: 16,
-                    right: 16,
-                    child: Text(
-                      '${_currentIndex + 1} / ${_videos.length}\n'
-                      '${_videos[_currentIndex].name}',
-                      textAlign: TextAlign.center,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: Colors.white,
-                        shadows: [
-                          Shadow(
-                            blurRadius: 8,
-                            color: Colors.black,
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
                 ],
               ),
       ),
