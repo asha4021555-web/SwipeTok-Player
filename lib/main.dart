@@ -40,6 +40,9 @@ class _VideoHomePageState extends State<VideoHomePage>
   final PageController _pageController = PageController();
   final List<SafDocumentFile> _videos = [];
 
+  static const MethodChannel _pipChannel =
+      MethodChannel('swipe_player/pip');
+
   VideoPlayerController? _controller;
   SharedPreferences? _prefs;
   Directory? _tempDirectory;
@@ -57,17 +60,20 @@ class _VideoHomePageState extends State<VideoHomePage>
   bool _showResumePrompt = false;
   bool _coverMode = false;
   bool _unlocking = false;
+  bool _isPipMode = false;
+  bool _holdSpeedActive = false;
 
   double _volume = 1.0;
   double _speed = 1.0;
   double _brightness = 1.0;
-  double _savedPosition = 0;
 
   String? _error;
   String? _folderUri;
   String? _lastVideoUri;
 
-  DateTime _lastProgressSave = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime _lastProgressSave =
+      DateTime.fromMillisecondsSinceEpoch(0);
+
   Timer? _unlockTimer;
 
   static const Set<String> _extensions = {
@@ -79,6 +85,16 @@ class _VideoHomePageState extends State<VideoHomePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+
+    _pipChannel.setMethodCallHandler((call) async {
+      if (call.method == 'pipChanged') {
+        final active = call.arguments?['isInPipMode'] == true;
+        if (mounted) {
+          setState(() => _isPipMode = active);
+        }
+      }
+    });
+
     _initializeApp();
   }
 
@@ -88,7 +104,9 @@ class _VideoHomePageState extends State<VideoHomePage>
 
       _folderUri = _prefs!.getString('folderUri');
       _lastVideoUri = _prefs!.getString('lastVideoUri');
-      _savedPosition = _prefs!.getDouble('lastPosition') ?? 0;
+
+      final savedPosition =
+          _prefs!.getDouble('lastPosition') ?? 0;
 
       _repeat = _prefs!.getBool('repeat') ?? false;
       _autoplay = _prefs!.getBool('autoplay') ?? true;
@@ -110,6 +128,7 @@ class _VideoHomePageState extends State<VideoHomePage>
         if (hasPermission) {
           final folder = await _saf.stat(_folderUri!);
           if (folder != null && folder.isDir) {
+            _savedPosition = savedPosition;
             await _loadFolder(folder, restoring: true);
             return;
           }
@@ -131,6 +150,8 @@ class _VideoHomePageState extends State<VideoHomePage>
       }
     }
   }
+
+  double _savedPosition = 0;
 
   Future<void> _pickFolder() async {
     if (_loading) return;
@@ -283,7 +304,8 @@ class _VideoHomePageState extends State<VideoHomePage>
         return;
       }
 
-      if (!await localFile.exists() || await localFile.length() == 0) {
+      if (!await localFile.exists() ||
+          await localFile.length() == 0) {
         throw Exception('ملف الفيديو فارغ أو غير موجود');
       }
 
@@ -321,7 +343,9 @@ class _VideoHomePageState extends State<VideoHomePage>
     }
   }
 
-  Future<void> _askResume(VideoPlayerController controller) async {
+  Future<void> _askResume(
+    VideoPlayerController controller,
+  ) async {
     final choice = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -346,10 +370,9 @@ class _VideoHomePageState extends State<VideoHomePage>
     if (!mounted || !controller.value.isInitialized) return;
 
     if (choice == true) {
-      final position = Duration(
-        milliseconds: _savedPosition.toInt(),
+      await controller.seekTo(
+        Duration(milliseconds: _savedPosition.toInt()),
       );
-      await controller.seekTo(position);
     } else {
       await controller.seekTo(Duration.zero);
     }
@@ -360,7 +383,10 @@ class _VideoHomePageState extends State<VideoHomePage>
   void _videoListener() {
     final controller = _controller;
 
-    if (controller == null || !controller.value.isInitialized) return;
+    if (controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
 
     final value = controller.value;
 
@@ -410,10 +436,13 @@ class _VideoHomePageState extends State<VideoHomePage>
   }
 
   void _togglePlayback() {
-    if (_locked) return;
+    if (_locked || _isPipMode || _holdSpeedActive) return;
 
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+    if (controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
 
     if (controller.value.isPlaying) {
       controller.pause();
@@ -426,7 +455,10 @@ class _VideoHomePageState extends State<VideoHomePage>
 
   Future<void> _seekTo(double milliseconds) async {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+    if (controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
 
     await controller.seekTo(
       Duration(milliseconds: milliseconds.toInt()),
@@ -446,11 +478,106 @@ class _VideoHomePageState extends State<VideoHomePage>
     return '$minutes:${seconds.toString().padLeft(2, '0')}';
   }
 
+  // سرعة مؤقتة أثناء الضغط المطوّل.
+  Future<void> _setTemporarySpeed(double speed) async {
+    final controller = _controller;
+    if (controller == null ||
+        !controller.value.isInitialized) {
+      return;
+    }
+
+    try {
+      await controller.setPlaybackSpeed(speed);
+    } catch (_) {}
+  }
+
+  void _startHoldSpeed(LongPressStartDetails details) {
+    if (_locked || _isPipMode) return;
+
+    _holdSpeedActive = true;
+    _setTemporarySpeed(2.0);
+
+    if (mounted) setState(() {});
+  }
+
+  void _updateHoldSpeed(LongPressMoveUpdateDetails details) {
+    if (!_holdSpeedActive) return;
+
+    final dy = details.offsetFromOrigin.dy;
+
+    if (dy <= -60) {
+      _setTemporarySpeed(8.0);
+    } else if (dy <= -25) {
+      _setTemporarySpeed(4.0);
+    } else if (dy >= 25) {
+      _setTemporarySpeed(1.0);
+    } else {
+      _setTemporarySpeed(2.0);
+    }
+  }
+
+  void _endHoldSpeed(LongPressEndDetails details) {
+    _restoreHoldSpeed();
+  }
+
+  void _cancelHoldSpeed() {
+    _restoreHoldSpeed();
+  }
+
+  void _restoreHoldSpeed() {
+    if (!_holdSpeedActive) return;
+
+    _holdSpeedActive = false;
+    _setTemporarySpeed(_speed);
+
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _enterPictureInPicture() async {
+    if (_locked || _controller == null ||
+        !_controller!.value.isInitialized) {
+      return;
+    }
+
+    final videoSize = _controller!.value.size;
+    final width = videoSize.width.round().clamp(1, 10000);
+    final height = videoSize.height.round().clamp(1, 10000);
+
+    try {
+      final success = await _pipChannel.invokeMethod<bool>(
+        'enterPip',
+        {
+          'width': width,
+          'height': height,
+        },
+      );
+
+      if (success != true && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('تعذر تشغيل النافذة العائمة على هذا الجهاز.'),
+          ),
+        );
+      }
+    } on PlatformException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('النافذة العائمة غير متاحة: ${e.message ?? ''}')),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('تعذر تشغيل النافذة العائمة.'),
+        ),
+      );
+    }
+  }
+
   void _lockChildren() {
     setState(() => _locked = true);
   }
 
-  // يبدأ حساب الثلاث ثواني من أول لمسة على علامة القفل.
   void _startUnlock() {
     if (!_locked || _unlocking) return;
 
@@ -479,7 +606,7 @@ class _VideoHomePageState extends State<VideoHomePage>
   }
 
   Future<void> _openSettings() async {
-    if (_locked) return;
+    if (_locked || _isPipMode) return;
 
     await showModalBottomSheet(
       context: context,
@@ -710,7 +837,9 @@ class _VideoHomePageState extends State<VideoHomePage>
                         if (index != _currentIndex ||
                             controller == null ||
                             !controller.value.isInitialized) {
-                          return const ColoredBox(color: Colors.black);
+                          return const ColoredBox(
+                            color: Colors.black,
+                          );
                         }
 
                         final size = controller.value.size;
@@ -718,14 +847,15 @@ class _VideoHomePageState extends State<VideoHomePage>
                         return GestureDetector(
                           behavior: HitTestBehavior.opaque,
                           onTap: _togglePlayback,
+                          onLongPressStart: _startHoldSpeed,
+                          onLongPressMoveUpdate: _updateHoldSpeed,
+                          onLongPressEnd: _endHoldSpeed,
+                          onLongPressCancel: _cancelHoldSpeed,
                           child: Center(
                             child: InteractiveViewer(
                               key: ValueKey(index),
                               minScale: 1,
                               maxScale: 4,
-
-                              // منع السحب بإصبع واحد داخل الفيديو
-                              // لتقليل تعارضه مع التنقل الرأسي.
                               panEnabled: false,
                               scaleEnabled: true,
                               child: SizedBox.expand(
@@ -747,12 +877,12 @@ class _VideoHomePageState extends State<VideoHomePage>
                     ),
                   ),
 
-                  if (_loading)
+                  if (_loading && !_isPipMode)
                     const Center(
                       child: CircularProgressIndicator(),
                     ),
 
-                  if (_error != null)
+                  if (_error != null && !_isPipMode)
                     Center(
                       child: Padding(
                         padding: const EdgeInsets.all(24),
@@ -764,7 +894,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                       ),
                     ),
 
-                  if (!_locked) ...[
+                  if (!_locked && !_isPipMode) ...[
                     Positioned(
                       top: 8,
                       right: 8,
@@ -823,20 +953,34 @@ class _VideoHomePageState extends State<VideoHomePage>
                                   onChanged:
                                       totalMs > 0 ? _seekTo : null,
                                 ),
-                                Text(
-                                  '${_currentIndex + 1} / ${_videos.length}  •  ${_videos[_currentIndex].name}',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  textAlign: TextAlign.center,
-                                  style: const TextStyle(
-                                    color: Colors.white,
-                                    shadows: [
-                                      Shadow(
-                                        blurRadius: 8,
-                                        color: Colors.black,
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: Text(
+                                        '${_currentIndex + 1} / ${_videos.length}  •  ${_videos[_currentIndex].name}',
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        textAlign: TextAlign.center,
+                                        style: const TextStyle(
+                                          color: Colors.white,
+                                          shadows: [
+                                            Shadow(
+                                              blurRadius: 8,
+                                              color: Colors.black,
+                                            ),
+                                          ],
+                                        ),
                                       ),
-                                    ],
-                                  ),
+                                    ),
+                                    IconButton(
+                                      onPressed: _enterPictureInPicture,
+                                      icon: const Icon(
+                                        Icons.picture_in_picture_alt,
+                                        color: Colors.white,
+                                      ),
+                                      tooltip: 'نافذة عائمة',
+                                    ),
+                                  ],
                                 ),
                               ],
                             );
@@ -845,9 +989,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                       ),
                   ],
 
-                  // تعتيم الشاشة دون اعتراض اللمسات.
-                  // علامة القفل وحدها تستقبل الضغط لفك القفل.
-                  if (_locked) ...[
+                  if (_locked && !_isPipMode) ...[
                     Positioned.fill(
                       child: IgnorePointer(
                         child: ColoredBox(
@@ -895,6 +1037,34 @@ class _VideoHomePageState extends State<VideoHomePage>
                       ),
                     ),
                   ],
+
+                  if (_holdSpeedActive && !_isPipMode)
+                    Positioned(
+                      top: 60,
+                      left: 0,
+                      right: 0,
+                      child: Center(
+                        child: DecoratedBox(
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 18,
+                              vertical: 8,
+                            ),
+                            child: Text(
+                              'سرعة مؤقتة',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 16,
+                              ),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
                 ],
               ),
       ),
