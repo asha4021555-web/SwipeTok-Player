@@ -33,6 +33,23 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --project-name swipe_player .
 
+      - name: Apply Swipe Player launcher icon
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
+          python3 - <<'PY'
+          from pathlib import Path
+          import subprocess
+          source = Path("assets/swipe_player_icon.svg")
+          for folder in Path("android/app/src/main/res").glob("mipmap-*"):
+              for name in ("ic_launcher.png", "ic_launcher_foreground.png"):
+                  target = folder / name
+                  if target.exists():
+                      size = 192 if "xxxhdpi" in folder.name else 144 if "xxhdpi" in folder.name else 96 if "xhdpi" in folder.name else 72 if "hdpi" in folder.name else 48
+                      subprocess.run(["rsvg-convert", "-w", str(size), "-h", str(size), str(source), "-o", str(target)], check=True)
+          print("Swipe Player launcher icon applied.")
+          PY
+
       - name: Configure Android Picture-in-Picture
         run: |
           python3 - <<'PY'
