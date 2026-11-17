@@ -1,8 +1,8 @@
 
 import 'dart:io';
 
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:saf/saf.dart';
 import 'package:video_player/video_player.dart';
 
 void main() {
@@ -32,84 +32,116 @@ class VideoHomePage extends StatefulWidget {
 }
 
 class _VideoHomePageState extends State<VideoHomePage> {
+  final Saf _saf = Saf();
   final PageController _pageController = PageController();
-  final List<File> _videos = [];
+
+  final List<SafDocumentFile> _videos = [];
+
   VideoPlayerController? _controller;
+  int? _openedFd;
+
   int _currentIndex = 0;
   bool _loading = false;
   String? _error;
 
-  static const _extensions = {
-    'mp4', 'm4v', 'mov', 'mkv', 'avi', 'webm', '3gp', 'mpeg', 'mpg'
+  static const Set<String> _extensions = {
+    'mp4',
+    'm4v',
+    'mov',
+    'mkv',
+    'avi',
+    'webm',
+    '3gp',
+    'mpeg',
+    'mpg',
+    'ts',
   };
 
-  Future<void> _pickVideos() async {
+  Future<void> _pickFolder() async {
     try {
       setState(() {
         _loading = true;
         _error = null;
       });
 
-      final result = await FilePicker.platform.pickFiles(
-        type: FileType.video,
-        allowMultiple: true,
-        withData: false,
-      );
+      final folder = await _saf.pickDirectory();
 
-      if (result == null || result.files.isEmpty) {
+      if (folder == null) {
         if (mounted) setState(() => _loading = false);
         return;
       }
 
-      final picked = <File>[];
-      for (final item in result.files) {
-        final path = item.path;
-        if (path == null) continue;
-        final extension = path.split('.').last.toLowerCase();
+      final foundVideos = <SafDocumentFile>[];
+
+      await for (final entry in _saf.walk(folder.uri)) {
+        final file = entry.file;
+
+        if (file.isDir) continue;
+
+        final extension = file.name.contains('.')
+            ? file.name.split('.').last.toLowerCase()
+            : '';
+
         if (_extensions.contains(extension)) {
-          picked.add(File(path));
+          foundVideos.add(file);
         }
       }
 
-      if (picked.isEmpty) {
+      if (!mounted) return;
+
+      if (foundVideos.isEmpty) {
         setState(() {
           _loading = false;
-          _error = 'لم يتم العثور على ملفات فيديو قابلة للفتح.';
+          _error = 'لم يتم العثور على فيديوهات داخل هذا المجلد.';
         });
         return;
       }
 
-      await _disposeController();
+      await _disposeCurrentVideo();
+
+      if (!mounted) return;
+
       setState(() {
         _videos
           ..clear()
-          ..addAll(picked);
+          ..addAll(foundVideos);
         _currentIndex = 0;
         _loading = false;
+        _error = null;
       });
+
       await _openVideo(0);
     } catch (e) {
-      if (mounted) {
-        setState(() {
-          _loading = false;
-          _error = 'تعذر فتح الفيديوهات: $e';
-        });
-      }
+      if (!mounted) return;
+
+      setState(() {
+        _loading = false;
+        _error = 'حدث خطأ أثناء قراءة المجلد: $e';
+      });
     }
   }
 
-  Future<void> _disposeController() async {
-    final old = _controller;
+  Future<void> _disposeCurrentVideo() async {
+    final oldController = _controller;
     _controller = null;
-    if (old != null) {
-      await old.dispose();
+
+    if (oldController != null) {
+      await oldController.dispose();
+    }
+
+    final oldFd = _openedFd;
+    _openedFd = null;
+
+    if (oldFd != null) {
+      await _saf.closeFileDescriptor(oldFd);
     }
   }
 
   Future<void> _openVideo(int index) async {
     if (index < 0 || index >= _videos.length) return;
 
-    await _disposeController();
+    await _disposeCurrentVideo();
+
     if (!mounted) return;
 
     setState(() {
@@ -118,27 +150,50 @@ class _VideoHomePageState extends State<VideoHomePage> {
       _error = null;
     });
 
-    final controller = VideoPlayerController.file(_videos[index]);
-    _controller = controller;
-
     try {
+      final video = _videos[index];
+
+      final opened = await _saf.openFileDescriptor(
+        video.uri,
+        'r',
+      );
+
+      _openedFd = opened.fd;
+
+      final controller = VideoPlayerController.file(
+        File(opened.path),
+      );
+
+      _controller = controller;
+
       await controller.initialize();
       await controller.setLooping(true);
       await controller.play();
+
       if (!mounted || _controller != controller) return;
-      setState(() => _loading = false);
-    } catch (e) {
-      if (!mounted || _controller != controller) return;
+
       setState(() {
         _loading = false;
-        _error = 'هذا الفيديو غير مدعوم على الجهاز أو تعذر فتحه.';
+      });
+    } catch (e) {
+      await _disposeCurrentVideo();
+
+      if (!mounted) return;
+
+      setState(() {
+        _loading = false;
+        _error = 'تعذر تشغيل هذا الفيديو.';
       });
     }
   }
 
   void _togglePlayback() {
     final controller = _controller;
-    if (controller == null || !controller.value.isInitialized) return;
+
+    if (controller == null || !controller.value.isInitialized) {
+      return;
+    }
+
     setState(() {
       if (controller.value.isPlaying) {
         controller.pause();
@@ -151,7 +206,23 @@ class _VideoHomePageState extends State<VideoHomePage> {
   @override
   void dispose() {
     _pageController.dispose();
-    _controller?.dispose();
+
+    final controller = _controller;
+    final fd = _openedFd;
+
+    _controller = null;
+    _openedFd = null;
+
+    if (controller != null) {
+      controller.dispose().then((_) {
+        if (fd != null) {
+          _saf.closeFileDescriptor(fd);
+        }
+      });
+    } else if (fd != null) {
+      _saf.closeFileDescriptor(fd);
+    }
+
     super.dispose();
   }
 
@@ -176,9 +247,13 @@ class _VideoHomePageState extends State<VideoHomePage> {
                       if (index != _currentIndex ||
                           controller == null ||
                           !controller.value.isInitialized) {
-                        return const ColoredBox(color: Colors.black);
+                        return const ColoredBox(
+                          color: Colors.black,
+                        );
                       }
+
                       final size = controller.value.size;
+
                       return GestureDetector(
                         onTap: _togglePlayback,
                         child: Center(
@@ -194,7 +269,9 @@ class _VideoHomePageState extends State<VideoHomePage> {
                     },
                   ),
                   if (_loading)
-                    const Center(child: CircularProgressIndicator()),
+                    const Center(
+                      child: CircularProgressIndicator(),
+                    ),
                   if (_error != null)
                     Center(
                       child: Padding(
@@ -202,7 +279,9 @@ class _VideoHomePageState extends State<VideoHomePage> {
                         child: Text(
                           _error!,
                           textAlign: TextAlign.center,
-                          style: const TextStyle(color: Colors.white),
+                          style: const TextStyle(
+                            color: Colors.white,
+                          ),
                         ),
                       ),
                     ),
@@ -210,9 +289,9 @@ class _VideoHomePageState extends State<VideoHomePage> {
                     top: 12,
                     right: 12,
                     child: IconButton.filledTonal(
-                      onPressed: _pickVideos,
-                      icon: const Icon(Icons.video_library),
-                      tooltip: 'اختيار فيديوهات',
+                      onPressed: _pickFolder,
+                      icon: const Icon(Icons.folder_open),
+                      tooltip: 'اختيار مجلد',
                     ),
                   ),
                   Positioned(
@@ -220,13 +299,19 @@ class _VideoHomePageState extends State<VideoHomePage> {
                     left: 16,
                     right: 16,
                     child: Text(
-                      '${_currentIndex + 1} / ${_videos.length}\n${_videos[_currentIndex].uri.pathSegments.last}',
+                      '${_currentIndex + 1} / ${_videos.length}\n'
+                      '${_videos[_currentIndex].name}',
                       textAlign: TextAlign.center,
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(
                         color: Colors.white,
-                        shadows: [Shadow(blurRadius: 8, color: Colors.black)],
+                        shadows: [
+                          Shadow(
+                            blurRadius: 8,
+                            color: Colors.black,
+                          ),
+                        ],
                       ),
                     ),
                   ),
@@ -243,30 +328,43 @@ class _VideoHomePageState extends State<VideoHomePage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Icon(Icons.video_library, size: 72, color: Colors.white70),
+            const Icon(
+              Icons.video_library,
+              size: 72,
+              color: Colors.white70,
+            ),
             const SizedBox(height: 18),
             const Text(
               'Swipe Player',
-              style: TextStyle(fontSize: 26, fontWeight: FontWeight.bold),
+              style: TextStyle(
+                fontSize: 26,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             const SizedBox(height: 10),
             const Text(
-              'مشغل فيديوهات بدون إنترنت\nاختَر فيديوهات من جهازك ومرّر لأعلى أو لأسفل للتنقل.',
+              'مشغل فيديوهات بدون إنترنت\n'
+              'اختَر مجلد الفيديوهات وسيتم البحث داخله تلقائيًا.',
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 22),
             FilledButton.icon(
-              onPressed: _loading ? null : _pickVideos,
+              onPressed: _loading ? null : _pickFolder,
               icon: const Icon(Icons.folder_open),
-              label: const Text('اختيار الفيديوهات'),
+              label: const Text('اختيار مجلد الفيديوهات'),
             ),
             if (_loading) ...[
               const SizedBox(height: 16),
               const CircularProgressIndicator(),
+              const SizedBox(height: 8),
+              const Text('جاري البحث عن الفيديوهات...'),
             ],
             if (_error != null) ...[
               const SizedBox(height: 16),
-              Text(_error!, textAlign: TextAlign.center),
+              Text(
+                _error!,
+                textAlign: TextAlign.center,
+              ),
             ],
           ],
         ),
