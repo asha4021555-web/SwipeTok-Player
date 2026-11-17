@@ -1,4 +1,3 @@
-
 import 'dart:async';
 import 'dart:io';
 
@@ -57,6 +56,7 @@ class _VideoHomePageState extends State<VideoHomePage>
   bool _savePosition = true;
   bool _showResumePrompt = false;
   bool _coverMode = false;
+  bool _unlocking = false;
 
   double _volume = 1.0;
   double _speed = 1.0;
@@ -69,7 +69,6 @@ class _VideoHomePageState extends State<VideoHomePage>
 
   DateTime _lastProgressSave = DateTime.fromMillisecondsSinceEpoch(0);
   Timer? _unlockTimer;
-  bool _unlocking = false;
 
   static const Set<String> _extensions = {
     'mp4', 'm4v', 'mov', 'mkv', 'avi',
@@ -89,13 +88,11 @@ class _VideoHomePageState extends State<VideoHomePage>
 
       _folderUri = _prefs!.getString('folderUri');
       _lastVideoUri = _prefs!.getString('lastVideoUri');
-      _savedPosition =
-          _prefs!.getDouble('lastPosition') ?? 0;
+      _savedPosition = _prefs!.getDouble('lastPosition') ?? 0;
 
       _repeat = _prefs!.getBool('repeat') ?? false;
       _autoplay = _prefs!.getBool('autoplay') ?? true;
-      _savePosition =
-          _prefs!.getBool('savePosition') ?? true;
+      _savePosition = _prefs!.getBool('savePosition') ?? true;
       _volume = _prefs!.getDouble('volume') ?? 1.0;
       _speed = _prefs!.getDouble('speed') ?? 1.0;
       _brightness = _prefs!.getDouble('brightness') ?? 1.0;
@@ -140,9 +137,7 @@ class _VideoHomePageState extends State<VideoHomePage>
 
     try {
       final folder = await _saf.pickDirectory();
-
       if (folder == null) return;
-
       await _loadFolder(folder);
     } catch (e) {
       if (!mounted) return;
@@ -164,7 +159,6 @@ class _VideoHomePageState extends State<VideoHomePage>
 
       await for (final entry in _saf.walk(folder.uri)) {
         final file = entry.file;
-
         if (file.isDir) continue;
 
         final extension = file.name.contains('.')
@@ -193,7 +187,6 @@ class _VideoHomePageState extends State<VideoHomePage>
         ..addAll(foundVideos);
 
       _folderUri = folder.uri;
-
       await _prefs?.setString('folderUri', folder.uri);
 
       int startIndex = 0;
@@ -281,10 +274,7 @@ class _VideoHomePageState extends State<VideoHomePage>
         '${_tempDirectory!.path}/${index}_$safeName',
       );
 
-      await _saf.copyToLocalFile(
-        video.uri,
-        localFile.path,
-      );
+      await _saf.copyToLocalFile(video.uri, localFile.path);
 
       if (!mounted || request != _openRequest) {
         if (await localFile.exists()) {
@@ -293,8 +283,7 @@ class _VideoHomePageState extends State<VideoHomePage>
         return;
       }
 
-      if (!await localFile.exists() ||
-          await localFile.length() == 0) {
+      if (!await localFile.exists() || await localFile.length() == 0) {
         throw Exception('ملف الفيديو فارغ أو غير موجود');
       }
 
@@ -332,9 +321,7 @@ class _VideoHomePageState extends State<VideoHomePage>
     }
   }
 
-  Future<void> _askResume(
-    VideoPlayerController controller,
-  ) async {
+  Future<void> _askResume(VideoPlayerController controller) async {
     final choice = await showDialog<bool>(
       context: context,
       barrierDismissible: false,
@@ -362,7 +349,6 @@ class _VideoHomePageState extends State<VideoHomePage>
       final position = Duration(
         milliseconds: _savedPosition.toInt(),
       );
-
       await controller.seekTo(position);
     } else {
       await controller.seekTo(Duration.zero);
@@ -374,9 +360,7 @@ class _VideoHomePageState extends State<VideoHomePage>
   void _videoListener() {
     final controller = _controller;
 
-    if (controller == null || !controller.value.isInitialized) {
-      return;
-    }
+    if (controller == null || !controller.value.isInitialized) return;
 
     final value = controller.value;
 
@@ -429,10 +413,7 @@ class _VideoHomePageState extends State<VideoHomePage>
     if (_locked) return;
 
     final controller = _controller;
-
-    if (controller == null || !controller.value.isInitialized) {
-      return;
-    }
+    if (controller == null || !controller.value.isInitialized) return;
 
     if (controller.value.isPlaying) {
       controller.pause();
@@ -445,7 +426,6 @@ class _VideoHomePageState extends State<VideoHomePage>
 
   Future<void> _seekTo(double milliseconds) async {
     final controller = _controller;
-
     if (controller == null || !controller.value.isInitialized) return;
 
     await controller.seekTo(
@@ -470,11 +450,13 @@ class _VideoHomePageState extends State<VideoHomePage>
     setState(() => _locked = true);
   }
 
+  // يبدأ حساب الثلاث ثواني من أول لمسة على علامة القفل.
   void _startUnlock() {
     if (!_locked || _unlocking) return;
 
     _unlocking = true;
 
+    _unlockTimer?.cancel();
     _unlockTimer = Timer(const Duration(seconds: 3), () {
       if (mounted && _unlocking) {
         setState(() {
@@ -483,11 +465,17 @@ class _VideoHomePageState extends State<VideoHomePage>
         });
       }
     });
+
+    if (mounted) setState(() {});
   }
 
   void _cancelUnlock() {
     _unlocking = false;
     _unlockTimer?.cancel();
+
+    if (mounted && _locked) {
+      setState(() {});
+    }
   }
 
   Future<void> _openSettings() async {
@@ -501,15 +489,15 @@ class _VideoHomePageState extends State<VideoHomePage>
         return StatefulBuilder(
           builder: (context, setSheetState) {
             Widget heading(String text) => Padding(
-              padding: const EdgeInsets.only(top: 18, bottom: 8),
-              child: Text(
-                text,
-                style: const TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-            );
+                  padding: const EdgeInsets.only(top: 18, bottom: 8),
+                  child: Text(
+                    text,
+                    style: const TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                );
 
             Widget sliderSetting(
               String title,
@@ -546,9 +534,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                         ),
                       ),
                     ),
-
                     heading('الصورة والسطوع'),
-
                     sliderSetting(
                       'السطوع',
                       _brightness,
@@ -560,7 +546,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         await _prefs?.setDouble('brightness', v);
                       },
                     ),
-
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('ملء الشاشة وقص الزوائد'),
@@ -572,14 +557,11 @@ class _VideoHomePageState extends State<VideoHomePage>
                         _prefs?.setBool('coverMode', v);
                       },
                     ),
-
                     const Text(
                       'يمكن التكبير والتصغير بإصبعين على الفيديو.',
                       style: TextStyle(color: Colors.white70),
                     ),
-
                     heading('الصوت والتشغيل'),
-
                     sliderSetting(
                       'الصوت',
                       _volume,
@@ -590,7 +572,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         await _prefs?.setDouble('volume', v);
                       },
                     ),
-
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('سرعة التشغيل'),
@@ -612,7 +593,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         },
                       ),
                     ),
-
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('تكرار الفيديو'),
@@ -623,7 +603,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         await _prefs?.setBool('repeat', v);
                       },
                     ),
-
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('التشغيل التلقائي للفيديو التالي'),
@@ -633,9 +612,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                         _prefs?.setBool('autoplay', v);
                       },
                     ),
-
                     heading('الحفظ والمجلد'),
-
                     SwitchListTile(
                       contentPadding: EdgeInsets.zero,
                       title: const Text('حفظ مكان المشاهدة'),
@@ -648,7 +625,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         }
                       },
                     ),
-
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.folder_open),
@@ -658,15 +634,12 @@ class _VideoHomePageState extends State<VideoHomePage>
                         _pickFolder();
                       },
                     ),
-
                     const Divider(),
-
                     const Text(
                       'قفل الأطفال: اضغط علامة القفل أثناء المشاهدة. '
                       'لفكه اضغط عليها باستمرار لمدة 3 ثوانٍ.',
                       style: TextStyle(color: Colors.white70),
                     ),
-
                     const SizedBox(height: 18),
                   ],
                 ),
@@ -737,9 +710,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                         if (index != _currentIndex ||
                             controller == null ||
                             !controller.value.isInitialized) {
-                          return const ColoredBox(
-                            color: Colors.black,
-                          );
+                          return const ColoredBox(color: Colors.black);
                         }
 
                         final size = controller.value.size;
@@ -752,7 +723,10 @@ class _VideoHomePageState extends State<VideoHomePage>
                               key: ValueKey(index),
                               minScale: 1,
                               maxScale: 4,
-                              panEnabled: true,
+
+                              // منع السحب بإصبع واحد داخل الفيديو
+                              // لتقليل تعارضه مع التنقل الرأسي.
+                              panEnabled: false,
                               scaleEnabled: true,
                               child: SizedBox.expand(
                                 child: FittedBox(
@@ -800,7 +774,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         tooltip: 'الإعدادات',
                       ),
                     ),
-
                     Positioned(
                       top: 8,
                       left: 8,
@@ -810,7 +783,6 @@ class _VideoHomePageState extends State<VideoHomePage>
                         tooltip: 'قفل الأطفال',
                       ),
                     ),
-
                     if (controller != null &&
                         controller.value.isInitialized)
                       Positioned(
@@ -848,9 +820,8 @@ class _VideoHomePageState extends State<VideoHomePage>
                                       : 0,
                                   min: 0,
                                   max: totalMs > 0 ? totalMs : 1,
-                                  onChanged: totalMs > 0
-                                      ? _seekTo
-                                      : null,
+                                  onChanged:
+                                      totalMs > 0 ? _seekTo : null,
                                 ),
                                 Text(
                                   '${_currentIndex + 1} / ${_videos.length}  •  ${_videos[_currentIndex].name}',
@@ -874,46 +845,56 @@ class _VideoHomePageState extends State<VideoHomePage>
                       ),
                   ],
 
-                  if (_locked)
+                  // تعتيم الشاشة دون اعتراض اللمسات.
+                  // علامة القفل وحدها تستقبل الضغط لفك القفل.
+                  if (_locked) ...[
                     Positioned.fill(
-                      child: ColoredBox(
-                        color: Colors.black.withValues(alpha: 0.12),
-                        child: Center(
-                          child: GestureDetector(
-                            onLongPressStart: (_) => _startUnlock(),
-                            onLongPressEnd: (_) => _cancelUnlock(),
-                            onLongPressCancel: _cancelUnlock,
-                            child: Container(
-                              padding: const EdgeInsets.all(24),
-                              decoration: const BoxDecoration(
-                                color: Colors.black87,
-                                shape: BoxShape.circle,
+                      child: IgnorePointer(
+                        child: ColoredBox(
+                          color: Colors.black.withValues(alpha: 0.12),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      top: 8,
+                      left: 8,
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTapDown: (_) => _startUnlock(),
+                        onTapUp: (_) => _cancelUnlock(),
+                        onTapCancel: _cancelUnlock,
+                        child: Container(
+                          padding: const EdgeInsets.all(12),
+                          decoration: BoxDecoration(
+                            color: Colors.black87,
+                            borderRadius: BorderRadius.circular(30),
+                            border: Border.all(color: Colors.white54),
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Icon(
+                                _unlocking
+                                    ? Icons.lock_open
+                                    : Icons.lock,
+                                color: Colors.white,
+                                size: 28,
                               ),
-                              child: Column(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  const Icon(
-                                    Icons.lock,
-                                    size: 48,
-                                    color: Colors.white,
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Text(
-                                    _unlocking
-                                        ? 'استمر في الضغط...'
-                                        : 'مقفل',
-                                  ),
-                                  const Text(
-                                    'اضغط 3 ثوانٍ لفك القفل',
-                                    style: TextStyle(fontSize: 11),
-                                  ),
-                                ],
+                              const SizedBox(width: 8),
+                              Text(
+                                _unlocking
+                                    ? 'استمر في الضغط...'
+                                    : 'مقفل',
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                ),
                               ),
-                            ),
+                            ],
                           ),
                         ),
                       ),
                     ),
+                  ],
                 ],
               ),
       ),
