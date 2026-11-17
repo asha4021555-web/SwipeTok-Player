@@ -119,26 +119,43 @@ class _VideoHomePageState extends State<VideoHomePage>
       await ScreenBrightness.instance
           .setApplicationScreenBrightness(_brightness);
 
-      if (_folderUri != null) {
-        final permissions = await _saf.persistedPermissions();
-        final hasPermission = permissions.any(
-          (p) => p.uri == _folderUri && p.read,
-        );
+      // Restore the exact saved SAF grant first. Some Android document
+      // providers may return a normalized URI in the persisted grant list.
+      final permissions = await _saf.persistedPermissions();
+      final readGrants = permissions.where((p) => p.read).toList()
+        ..sort((a, b) => b.persistedTime.compareTo(a.persistedTime));
 
-        if (hasPermission) {
-          final folder = await _saf.stat(_folderUri!);
+      final candidates = <String>[];
+      if (_folderUri != null &&
+          readGrants.any((p) => p.uri == _folderUri)) {
+        candidates.add(_folderUri!);
+      } else if (readGrants.length == 1) {
+        // Safe fallback only when there is exactly one readable grant;
+        // never guess between multiple folders.
+        candidates.add(readGrants.single.uri);
+      }
+
+      for (final uri in candidates) {
+        try {
+          final folder = await _saf.stat(uri);
           if (folder != null && folder.isDir) {
+            _folderUri = folder.uri;
             _savedPosition = savedPosition;
+            await _prefs!.setString('folderUri', folder.uri);
             await _loadFolder(folder, restoring: true);
             return;
           }
+        } catch (_) {
+          // Try the next persisted candidate, if any.
         }
       }
 
       if (mounted) {
         setState(() {
           _loading = false;
-          _error = 'اختَر مجلد الفيديوهات للبدء.';
+          _error = readGrants.isEmpty
+              ? 'اختَر مجلد الفيديوهات للبدء.'
+              : 'تعذر فتح المجلد المحفوظ. اختَر المجلد مرة أخرى.';
         });
       }
     } catch (e) {
@@ -157,7 +174,7 @@ class _VideoHomePageState extends State<VideoHomePage>
     if (_loading) return;
 
     try {
-      final folder = await _saf.pickDirectory();
+      final folder = await _saf.pickDirectory(persistablePermission: true);
       if (folder == null) return;
       await _loadFolder(folder);
     } catch (e) {
