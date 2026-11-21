@@ -59,6 +59,19 @@ jobs:
           manifest = Path("android/app/src/main/AndroidManifest.xml")
           content = manifest.read_text()
 
+          if "android.permission.WRITE_SETTINGS" not in content:
+              content = content.replace(
+                  "<manifest ",
+                  '<manifest ',
+                  1
+              )
+              content = re.sub(
+                  r'(<manifest\\b[^>]*>)',
+                  r'\\1\\n    <uses-permission android:name="android.permission.WRITE_SETTINGS" />',
+                  content,
+                  count=1
+              )
+
           if 'android:supportsPictureInPicture="true"' not in content:
               pattern = r'(<activity\b[^>]*android:name="[^"]*MainActivity"[^>]*)(>)'
               content, count = re.subn(
@@ -97,9 +110,17 @@ jobs:
           new_content = f'''package {package_name}
 
           import android.app.PictureInPictureParams
+          import android.content.ContentValues
+          import android.content.Intent
           import android.content.res.Configuration
+          import android.media.RingtoneManager
+          import android.net.Uri
           import android.os.Build
+          import android.os.Environment
+          import android.provider.MediaStore
+          import android.provider.Settings
           import android.util.Rational
+          import java.io.File
           import io.flutter.embedding.android.FlutterActivity
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
