@@ -60,14 +60,9 @@ jobs:
           content = manifest.read_text()
 
           if "android.permission.WRITE_SETTINGS" not in content:
-              content = content.replace(
-                  "<manifest ",
-                  '<manifest ',
-                  1
-              )
               content = re.sub(
-                  r'(<manifest\\b[^>]*>)',
-                  r'\\1\\n    <uses-permission android:name="android.permission.WRITE_SETTINGS" />',
+                  r'(<manifest\b[^>]*>)',
+                  r'\1\n    <uses-permission android:name="android.permission.WRITE_SETTINGS" />',
                   content,
                   count=1
               )
@@ -131,6 +126,69 @@ jobs:
 
               override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
                   super.configureFlutterEngine(flutterEngine)
+
+                  MethodChannel(
+                      flutterEngine.dartExecutor.binaryMessenger,
+                      "swipe_player/music"
+                  ).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "setRingtone" -> {
+                              try {
+                                  val path = call.argument<String>("path")
+                                  if (path.isNullOrBlank()) {
+                                      result.error("INVALID_FILE", "Audio file path is missing.", null)
+                                      return@setMethodCallHandler
+                                  }
+                                  if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
+                                      !Settings.System.canWrite(this)) {
+                                      startActivity(Intent(
+                                          Settings.ACTION_MANAGE_WRITE_SETTINGS,
+                                          Uri.parse("package:$packageName")
+                                      ))
+                                      result.success(false)
+                                      return@setMethodCallHandler
+                                  }
+                                  val source = File(path)
+                                  if (!source.exists() || source.length() == 0L) {
+                                      result.error("INVALID_FILE", "Audio file is unavailable.", null)
+                                      return@setMethodCallHandler
+                                  }
+                                  val values = ContentValues().apply {
+                                      put(MediaStore.MediaColumns.DISPLAY_NAME,
+                                          "SwipePlayer_${System.currentTimeMillis()}_${source.name}")
+                                      put(MediaStore.MediaColumns.MIME_TYPE, "audio/*")
+                                      put(MediaStore.Audio.Media.IS_RINGTONE, true)
+                                      put(MediaStore.Audio.Media.IS_NOTIFICATION, false)
+                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                                          put(MediaStore.MediaColumns.RELATIVE_PATH,
+                                              Environment.DIRECTORY_RINGTONES)
+                                      }
+                                  }
+                                  val audioUri = contentResolver.insert(
+                                      MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values
+                                  ) ?: throw IllegalStateException("Could not add audio to Ringtones.")
+                                  contentResolver.openOutputStream(audioUri)?.use { output ->
+                                      source.inputStream().use { input -> input.copyTo(output) }
+                                  } ?: throw IllegalStateException("Could not write ringtone file.")
+                                  RingtoneManager.setActualDefaultRingtoneUri(
+                                      this, RingtoneManager.TYPE_RINGTONE, audioUri
+                                  )
+                                  result.success(true)
+                              } catch (e: Exception) {
+                                  result.error("RINGTONE_ERROR", e.message, null)
+                              }
+                          }
+                          "openSoundSettings" -> {
+                              try {
+                                  startActivity(Intent(Settings.ACTION_SOUND_SETTINGS))
+                                  result.success(true)
+                              } catch (e: Exception) {
+                                  result.error("SETTINGS_ERROR", e.message, null)
+                              }
+                          }
+                          else -> result.notImplemented()
+                      }
+                  }
 
                   pipChannel = MethodChannel(
                       flutterEngine.dartExecutor.binaryMessenger,
