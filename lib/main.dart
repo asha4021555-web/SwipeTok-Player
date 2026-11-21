@@ -60,7 +60,6 @@ class _VideoHomePageState extends State<VideoHomePage>
   bool _savePosition = true;
   bool _showResumePrompt = false;
   bool _coverMode = false;
-  bool _unlocking = false;
   bool _isPipMode = false;
   bool _holdSpeedActive = false;
 
@@ -76,7 +75,6 @@ class _VideoHomePageState extends State<VideoHomePage>
   DateTime _lastProgressSave =
       DateTime.fromMillisecondsSinceEpoch(0);
 
-  Timer? _unlockTimer;
 
   static const Set<String> _extensions = {
     'mp4', 'm4v', 'mov', 'mkv', 'avi',
@@ -690,31 +688,9 @@ class _VideoHomePageState extends State<VideoHomePage>
     setState(() => _locked = true);
   }
 
-  void _startUnlock() {
-    if (!_locked || _unlocking) return;
-
-    _unlocking = true;
-
-    _unlockTimer?.cancel();
-    _unlockTimer = Timer(const Duration(seconds: 3), () {
-      if (mounted && _unlocking) {
-        setState(() {
-          _locked = false;
-          _unlocking = false;
-        });
-      }
-    });
-
-    if (mounted) setState(() {});
-  }
-
-  void _cancelUnlock() {
-    _unlocking = false;
-    _unlockTimer?.cancel();
-
-    if (mounted && _locked) {
-      setState(() {});
-    }
+  void _unlockChildren() {
+    if (!_locked) return;
+    setState(() => _locked = false);
   }
 
   Future<void> _openSettings() async {
@@ -902,7 +878,6 @@ class _VideoHomePageState extends State<VideoHomePage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _unlockTimer?.cancel();
     _openRequest++;
     _pageController.dispose();
 
@@ -1132,9 +1107,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                       left: 8,
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onTapDown: (_) => _startUnlock(),
-                        onTapUp: (_) => _cancelUnlock(),
-                        onTapCancel: _cancelUnlock,
+                        onTap: _unlockChildren,
                         child: Container(
                           padding: const EdgeInsets.all(12),
                           decoration: BoxDecoration(
@@ -1145,21 +1118,15 @@ class _VideoHomePageState extends State<VideoHomePage>
                           child: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
-                              Icon(
-                                _unlocking
-                                    ? Icons.lock_open
-                                    : Icons.lock,
+                              const Icon(
+                                Icons.lock_open,
                                 color: Colors.white,
                                 size: 28,
                               ),
                               const SizedBox(width: 8),
-                              Text(
-                                _unlocking
-                                    ? 'استمر في الضغط...'
-                                    : 'مقفل',
-                                style: const TextStyle(
-                                  color: Colors.white,
-                                ),
+                              const Text(
+                                'اضغط للفتح',
+                                style: TextStyle(color: Colors.white),
                               ),
                             ],
                           ),
