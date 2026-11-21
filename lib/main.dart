@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:just_audio/just_audio.dart';
 import 'package:saf/saf.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -580,6 +581,21 @@ class _VideoHomePageState extends State<VideoHomePage>
     if (mounted) setState(() {});
   }
 
+  Future<void> _openMusic() async {
+    if (_locked || _isPipMode) return;
+    final wasPlaying = _controller?.value.isPlaying ?? false;
+    if (wasPlaying) await _controller?.pause();
+    if (!mounted) return;
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => const MusicLibraryPage(),
+      ),
+    );
+    if (mounted && wasPlaying && !_locked && !_isPipMode) {
+      await _controller?.play();
+    }
+  }
+
   Future<void> _showVideoList() async {
     if (_locked || _isPipMode || _videos.isEmpty) return;
 
@@ -1011,6 +1027,15 @@ class _VideoHomePageState extends State<VideoHomePage>
                     ),
                     Positioned(
                       top: 8,
+                      left: 64,
+                      child: IconButton.filledTonal(
+                        onPressed: _openMusic,
+                        icon: const Icon(Icons.library_music),
+                        tooltip: 'مشغل الموسيقى',
+                      ),
+                    ),
+                    Positioned(
+                      top: 8,
                       left: 8,
                       child: IconButton.filledTonal(
                         onPressed: _lockChildren,
@@ -1208,6 +1233,12 @@ class _VideoHomePageState extends State<VideoHomePage>
               icon: const Icon(Icons.folder_open),
               label: const Text('اختيار مجلد الفيديوهات'),
             ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _openMusic,
+              icon: const Icon(Icons.library_music),
+              label: const Text('فتح مشغل الموسيقى'),
+            ),
             if (_loading) ...[
               const SizedBox(height: 16),
               const CircularProgressIndicator(),
@@ -1227,3 +1258,321 @@ class _VideoHomePageState extends State<VideoHomePage>
     );
   }
 }
+
+class MusicLibraryPage extends StatefulWidget {
+  const MusicLibraryPage({super.key});
+
+  @override
+  State<MusicLibraryPage> createState() => _MusicLibraryPageState();
+}
+
+class _MusicLibraryPageState extends State<MusicLibraryPage> {
+  static const MethodChannel _musicChannel = MethodChannel('swipe_player/music');
+  static const Set<String> _audioExtensions = {
+    'mp3', 'm4a', 'aac', 'wav', 'ogg', 'flac', 'opus', 'amr', '3gp',
+  };
+
+  final Saf _saf = Saf();
+  final AudioPlayer _player = AudioPlayer();
+  final List<SafDocumentFile> _tracks = [];
+  final List<String> _folderUris = [];
+  Directory? _tempDirectory;
+  File? _currentLocalFile;
+  int _currentIndex = -1;
+  bool _loading = true;
+  String? _message;
+
+  @override
+  void initState() {
+    super.initState();
+    _restoreMusicFolders();
+  }
+
+  Future<void> _restoreMusicFolders() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      _folderUris
+        ..clear()
+        ..addAll(prefs.getStringList('musicFolderUris') ?? <String>[]);
+      final permissions = await _saf.persistedPermissions();
+      final readable = permissions.where((p) => p.read).map((p) => p.uri).toSet();
+      final valid = _folderUris.where(readable.contains).toList();
+      await _loadMusicFolders(valid, restoring: true);
+    } catch (e) {
+      if (mounted) setState(() { _loading = false; _message = 'تعذر استعادة مجلدات الموسيقى: $e'; });
+    }
+  }
+
+  Future<void> _pickMusicFolder() async {
+    try {
+      final folder = await _saf.pickDirectory(persistablePermission: true);
+      if (folder == null) return;
+      if (!_folderUris.contains(folder.uri)) _folderUris.add(folder.uri);
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setStringList('musicFolderUris', _folderUris);
+      await _loadMusicFolders(List<String>.from(_folderUris));
+    } catch (e) {
+      if (mounted) setState(() => _message = 'تعذر اختيار المجلد: $e');
+    }
+  }
+
+  Future<void> _loadMusicFolders(List<String> folders, {bool restoring = false}) async {
+    if (mounted) setState(() { _loading = true; _message = null; });
+    final found = <SafDocumentFile>[];
+    final valid = <String>[];
+    for (final uri in folders) {
+      try {
+        final folder = await _saf.stat(uri);
+        if (folder == null || !folder.isDir) continue;
+        valid.add(folder.uri);
+        await for (final entry in _saf.walk(folder.uri)) {
+          final file = entry.file;
+          if (file.isDir) continue;
+          final ext = file.name.contains('.') ? file.name.split('.').last.toLowerCase() : '';
+          if (_audioExtensions.contains(ext) && !found.any((item) => item.uri == file.uri)) {
+            found.add(file);
+          }
+        }
+      } catch (_) {}
+    }
+    if (!mounted) return;
+    _folderUris..clear()..addAll(valid);
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setStringList('musicFolderUris', _folderUris);
+    setState(() {
+      _tracks..clear()..addAll(found);
+      _loading = false;
+      if (found.isEmpty) _message = restoring
+          ? 'اختَر مجلد الموسيقى لعرض أغانيك.'
+          : 'لم يتم العثور على ملفات صوتية في المجلدات المختارة.';
+    });
+  }
+
+  Future<void> _playTrack(int index) async {
+    if (index < 0 || index >= _tracks.length) return;
+    try {
+      _tempDirectory ??= await Directory.systemTemp.createTemp('swipe_music_');
+      final track = _tracks[index];
+      final safeName = track.name.replaceAll(RegExp(r'[^a-zA-Z0-9._-]'), '_');
+      final local = File('${_tempDirectory!.path}/${index}_$safeName');
+      await _saf.copyToLocalFile(track.uri, local.path);
+      if (!await local.exists() || await local.length() == 0) {
+        throw Exception('ملف الصوت فارغ أو غير متاح');
+      }
+      await _player.setFilePath(local.path);
+      _currentLocalFile = local;
+      if (!mounted) return;
+      setState(() => _currentIndex = index);
+      await _player.play();
+    } catch (e) {
+      if (mounted) setState(() => _message = 'تعذر تشغيل الملف: $e');
+    }
+  }
+
+  Future<void> _setAsRingtone() async {
+    final file = _currentLocalFile;
+    if (file == null || !await file.exists()) {
+      if (mounted) setState(() => _message = 'شغّل الأغنية أولًا ثم اختر تعيين نغمة الرنين.');
+      return;
+    }
+    try {
+      final result = await _musicChannel.invokeMethod<bool>('setRingtone', {
+        'path': file.path,
+        'name': _tracks[_currentIndex].name,
+      });
+      if (!mounted) return;
+      setState(() => _message = result == true
+          ? 'تم تعيين نغمة الهاتف بنجاح.'
+          : 'افتح إذن تعديل إعدادات النظام، ثم ارجع واضغط تعيين النغمة مرة أخرى.');
+    } on PlatformException catch (e) {
+      if (mounted) setState(() => _message = 'تعذر تعيين النغمة: ${e.message ?? ''}');
+    } catch (e) {
+      if (mounted) setState(() => _message = 'تعذر تعيين النغمة: $e');
+    }
+  }
+
+  Future<void> _openSimRingtoneSettings() async {
+    try {
+      await _musicChannel.invokeMethod<void>('openSoundSettings');
+    } catch (_) {
+      if (mounted) setState(() => _message = 'تعذر فتح إعدادات الصوت على هذا الجهاز.');
+    }
+  }
+
+  String _time(Duration? d) {
+    if (d == null) return '--:--';
+    final s = d.inSeconds;
+    return '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+  }
+
+  @override
+  void dispose() {
+    _player.dispose();
+    _tempDirectory?.delete(recursive: true);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final currentName = _currentIndex >= 0 && _currentIndex < _tracks.length
+        ? _tracks[_currentIndex].name : 'لم يتم اختيار أغنية';
+    return Scaffold(
+      backgroundColor: const Color(0xFF090B18),
+      appBar: AppBar(
+        backgroundColor: const Color(0xFF10152B),
+        title: const Text('مشغل الموسيقى'),
+        actions: [
+          IconButton(
+            onPressed: _pickMusicFolder,
+            icon: const Icon(Icons.create_new_folder_outlined),
+            tooltip: 'إضافة مجلد موسيقى',
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(20),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: const LinearGradient(
+                colors: [Color(0xFF27245D), Color(0xFF075B70)],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+              ),
+            ),
+            child: Column(
+              children: [
+                const Icon(Icons.graphic_eq, size: 52, color: Colors.white),
+                const SizedBox(height: 12),
+                Text(currentName, maxLines: 2, overflow: TextOverflow.ellipsis,
+                    textAlign: TextAlign.center,
+                    style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                const SizedBox(height: 14),
+                StreamBuilder<Duration?>(
+                  stream: _player.durationStream,
+                  builder: (context, snapshot) {
+                    final duration = snapshot.data ?? Duration.zero;
+                    return StreamBuilder<Duration>(
+                      stream: _player.positionStream,
+                      builder: (context, positionSnapshot) {
+                        final position = positionSnapshot.data ?? Duration.zero;
+                        final max = duration.inMilliseconds.toDouble();
+                        final value = position.inMilliseconds.toDouble().clamp(0.0, max > 0 ? max : 1.0);
+                        return Column(children: [
+                          Slider(
+                            value: value,
+                            min: 0,
+                            max: max > 0 ? max : 1,
+                            onChanged: max > 0 ? (v) => _player.seek(Duration(milliseconds: v.round())) : null,
+                          ),
+                          Row(mainAxisAlignment: MainAxisAlignment.spaceBetween, children: [
+                            Text(_time(position)),
+                            Text(_time(duration)),
+                          ]),
+                        ]);
+                      },
+                    );
+                  },
+                ),
+                StreamBuilder<PlayerState>(
+                  stream: _player.playerStateStream,
+                  builder: (context, snapshot) {
+                    final playing = snapshot.data?.playing ?? false;
+                    return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+                      IconButton(
+                        onPressed: _currentIndex > 0 ? () => _playTrack(_currentIndex - 1) : null,
+                        icon: const Icon(Icons.skip_previous, size: 34),
+                      ),
+                      const SizedBox(width: 18),
+                      FilledButton(
+                        style: FilledButton.styleFrom(shape: const CircleBorder(), padding: const EdgeInsets.all(18)),
+                        onPressed: _currentIndex < 0 ? null : () => playing ? _player.pause() : _player.play(),
+                        child: Icon(playing ? Icons.pause : Icons.play_arrow, size: 34),
+                      ),
+                      const SizedBox(width: 18),
+                      IconButton(
+                        onPressed: _currentIndex >= 0 && _currentIndex + 1 < _tracks.length
+                            ? () => _playTrack(_currentIndex + 1) : null,
+                        icon: const Icon(Icons.skip_next, size: 34),
+                      ),
+                    ]);
+                  },
+                ),
+                const SizedBox(height: 8),
+                Wrap(spacing: 8, runSpacing: 8, alignment: WrapAlignment.center, children: [
+                  OutlinedButton.icon(
+                    onPressed: _currentIndex < 0 ? null : _setAsRingtone,
+                    icon: const Icon(Icons.music_note),
+                    label: const Text('تعيين نغمة الهاتف'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _openSimRingtoneSettings,
+                    icon: const Icon(Icons.sim_card),
+                    label: const Text('إعدادات رنين الشرائح'),
+                  ),
+                ]),
+              ],
+            ),
+          ),
+          if (_message != null)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(_message!, textAlign: TextAlign.center,
+                  style: const TextStyle(color: Colors.amberAccent)),
+            ),
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+            child: Row(children: [
+              const Expanded(child: Text('مكتبة الأغاني', style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold))),
+              Text('${_tracks.length} ملف', style: const TextStyle(color: Colors.white60)),
+            ]),
+          ),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _tracks.isEmpty
+                    ? Center(child: Padding(
+                        padding: const EdgeInsets.all(24),
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          const Icon(Icons.library_music, size: 58, color: Colors.white54),
+                          const SizedBox(height: 12),
+                          Text(_message ?? 'أضف مجلدًا يحتوي على الأغاني.'),
+                          const SizedBox(height: 12),
+                          FilledButton.icon(onPressed: _pickMusicFolder,
+                              icon: const Icon(Icons.folder_open), label: const Text('اختيار مجلد الموسيقى')),
+                        ]),
+                      ))
+                    : ListView.separated(
+                        itemCount: _tracks.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1, indent: 72),
+                        itemBuilder: (context, index) {
+                          final selected = index == _currentIndex;
+                          return ListTile(
+                            leading: CircleAvatar(
+                              backgroundColor: selected ? const Color(0xFF00B8A9) : const Color(0xFF202846),
+                              child: Icon(selected ? Icons.equalizer : Icons.music_note, color: Colors.white),
+                            ),
+                            title: Text(_tracks[index].name, maxLines: 1, overflow: TextOverflow.ellipsis),
+                            subtitle: Text(selected ? 'يتم تشغيلها الآن' : 'ملف صوتي'),
+                            onTap: () => _playTrack(index),
+                            trailing: IconButton(
+                              tooltip: 'تعيين كنغمة',
+                              onPressed: () async {
+                                await _playTrack(index);
+                                await _setAsRingtone();
+                              },
+                              icon: const Icon(Icons.notifications_active_outlined),
+                            ),
+                          );
+                        },
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
