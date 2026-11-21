@@ -102,7 +102,7 @@ jobs:
 
           package_name = match.group(1)
 
-          new_content = f'''package {package_name}
+          new_content = '''package PACKAGE_NAME
 
           import android.app.PictureInPictureParams
           import android.content.ContentValues
@@ -120,85 +120,85 @@ jobs:
           import io.flutter.embedding.engine.FlutterEngine
           import io.flutter.plugin.common.MethodChannel
 
-          class MainActivity : FlutterActivity() {{
+          class MainActivity : FlutterActivity() {
               private val pipChannelName = "swipe_player/pip"
               private var pipChannel: MethodChannel? = null
 
-              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {{
+              override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
                   super.configureFlutterEngine(flutterEngine)
 
                   MethodChannel(
                       flutterEngine.dartExecutor.binaryMessenger,
                       "swipe_player/music"
-                  ).setMethodCallHandler {{ call, result ->
-                      when (call.method) {{
-                          "setRingtone" -> {{
-                              try {{
+                  ).setMethodCallHandler { call, result ->
+                      when (call.method) {
+                          "setRingtone" -> {
+                              try {
                                   val path = call.argument<String>("path")
-                                  if (path.isNullOrBlank()) {{
+                                  if (path.isNullOrBlank()) {
                                       result.error("INVALID_FILE", "Audio file path is missing.", null)
                                       return@setMethodCallHandler
-                                  }}
+                                  }
                                   if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M &&
-                                      !Settings.System.canWrite(this)) {{
+                                      !Settings.System.canWrite(this)) {
                                       startActivity(Intent(
                                           Settings.ACTION_MANAGE_WRITE_SETTINGS,
                                           Uri.parse("package:$packageName")
                                       ))
                                       result.success(false)
                                       return@setMethodCallHandler
-                                  }}
+                                  }
                                   val source = File(path)
-                                  if (!source.exists() || source.length() == 0L) {{
+                                  if (!source.exists() || source.length() == 0L) {
                                       result.error("INVALID_FILE", "Audio file is unavailable.", null)
                                       return@setMethodCallHandler
-                                  }}
-                                  val values = ContentValues().apply {{
+                                  }
+                                  val values = ContentValues().apply {
                                       put(MediaStore.MediaColumns.DISPLAY_NAME,
-                                          "SwipePlayer_${{System.currentTimeMillis()}}_${{source.name}}")
+                                          "SwipePlayer_${System.currentTimeMillis()}_${source.name}")
                                       put(MediaStore.MediaColumns.MIME_TYPE, "audio/*")
                                       put(MediaStore.Audio.Media.IS_RINGTONE, true)
                                       put(MediaStore.Audio.Media.IS_NOTIFICATION, false)
-                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {{
+                                      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                                           put(MediaStore.MediaColumns.RELATIVE_PATH,
                                               Environment.DIRECTORY_RINGTONES)
-                                      }}
-                                  }}
+                                      }
+                                  }
                                   val audioUri = contentResolver.insert(
                                       MediaStore.Audio.Media.EXTERNAL_CONTENT_URI, values
                                   ) ?: throw IllegalStateException("Could not add audio to Ringtones.")
-                                  contentResolver.openOutputStream(audioUri)?.use {{ output ->
-                                      source.inputStream().use {{ input -> input.copyTo(output) }}
-                                  }} ?: throw IllegalStateException("Could not write ringtone file.")
+                                  contentResolver.openOutputStream(audioUri)?.use { output ->
+                                      source.inputStream().use { input -> input.copyTo(output) }
+                                  } ?: throw IllegalStateException("Could not write ringtone file.")
                                   RingtoneManager.setActualDefaultRingtoneUri(
                                       this, RingtoneManager.TYPE_RINGTONE, audioUri
                                   )
                                   result.success(true)
-                              }} catch (e: Exception) {{
+                              } catch (e: Exception) {
                                   result.error("RINGTONE_ERROR", e.message, null)
-                              }}
-                          }}
-                          "openSoundSettings" -> {{
-                              try {{
+                              }
+                          }
+                          "openSoundSettings" -> {
+                              try {
                                   startActivity(Intent(Settings.ACTION_SOUND_SETTINGS))
                                   result.success(true)
-                              }} catch (e: Exception) {{
+                              } catch (e: Exception) {
                                   result.error("SETTINGS_ERROR", e.message, null)
-                              }}
-                          }}
+                              }
+                          }
                           else -> result.notImplemented()
-                      }}
-                  }}
+                      }
+                  }
 
                   pipChannel = MethodChannel(
                       flutterEngine.dartExecutor.binaryMessenger,
                       pipChannelName
                   )
 
-                  pipChannel?.setMethodCallHandler {{ call, result ->
-                      if (call.method == "enterPip") {{
-                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {{
-                              try {{
+                  pipChannel?.setMethodCallHandler { call, result ->
+                      if (call.method == "enterPip") {
+                          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                              try {
                                   val width = call.argument<Int>("width") ?: 16
                                   val height = call.argument<Int>("height") ?: 9
 
@@ -207,26 +207,26 @@ jobs:
                                       .build()
 
                                   result.success(enterPictureInPictureMode(params))
-                              }} catch (e: Exception) {{
+                              } catch (e: Exception) {
                                   result.error("PIP_ERROR", e.message, null)
-                              }}
-                          }} else {{
+                              }
+                          } else {
                               result.error(
                                   "UNSUPPORTED",
                                   "Picture-in-picture requires Android 8.0 or later.",
                                   null
                               )
-                          }}
-                      }} else {{
+                          }
+                      } else {
                           result.notImplemented()
-                      }}
-                  }}
-              }}
+                      }
+                  }
+              }
 
               override fun onPictureInPictureModeChanged(
                   isInPictureInPictureMode: Boolean,
                   newConfig: Configuration
-              ) {{
+              ) {
                   super.onPictureInPictureModeChanged(
                       isInPictureInPictureMode,
                       newConfig
@@ -236,9 +236,9 @@ jobs:
                       "pipChanged",
                       mapOf("isInPipMode" to isInPictureInPictureMode)
                   )
-              }}
-          }}
-          '''
+              }
+          }
+          '''.replace("PACKAGE_NAME", package_name)
 
           activity.write_text(new_content)
           print("Picture-in-Picture Android configuration added.")
