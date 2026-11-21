@@ -69,6 +69,7 @@ class _VideoHomePageState extends State<VideoHomePage>
 
   String? _error;
   String? _folderUri;
+  final List<String> _folderUris = [];
   String? _lastVideoUri;
 
   DateTime _lastProgressSave =
@@ -103,10 +104,13 @@ class _VideoHomePageState extends State<VideoHomePage>
       _prefs = await SharedPreferences.getInstance();
 
       _folderUri = _prefs!.getString('folderUri');
+      _folderUris
+        ..clear()
+        ..addAll(_prefs!.getStringList('folderUris') ??
+            (_folderUri == null ? <String>[] : <String>[_folderUri!]));
       _lastVideoUri = _prefs!.getString('lastVideoUri');
 
-      final savedPosition =
-          _prefs!.getDouble('lastPosition') ?? 0;
+      final savedPosition = _prefs!.getDouble('lastPosition') ?? 0;
 
       _repeat = _prefs!.getBool('repeat') ?? false;
       _autoplay = _prefs!.getBool('autoplay') ?? true;
@@ -119,43 +123,34 @@ class _VideoHomePageState extends State<VideoHomePage>
       await ScreenBrightness.instance
           .setApplicationScreenBrightness(_brightness);
 
-      // Restore the exact saved SAF grant first. Some Android document
-      // providers may return a normalized URI in the persisted grant list.
       final permissions = await _saf.persistedPermissions();
-      final readGrants = permissions.where((p) => p.read).toList()
-        ..sort((a, b) => b.persistedTime.compareTo(a.persistedTime));
+      final readableUris = permissions
+          .where((p) => p.read)
+          .map((p) => p.uri)
+          .toSet();
 
-      final candidates = <String>[];
-      if (_folderUri != null &&
-          readGrants.any((p) => p.uri == _folderUri)) {
+      final candidates = _folderUris
+          .where((uri) => readableUris.contains(uri))
+          .toList();
+
+      // Backward compatibility with the previous single-folder setting.
+      if (candidates.isEmpty && _folderUri != null &&
+          readableUris.contains(_folderUri)) {
         candidates.add(_folderUri!);
-      } else if (readGrants.length == 1) {
-        // Safe fallback only when there is exactly one readable grant;
-        // never guess between multiple folders.
-        candidates.add(readGrants.single.uri);
       }
 
-      for (final uri in candidates) {
-        try {
-          final folder = await _saf.stat(uri);
-          if (folder != null && folder.isDir) {
-            _folderUri = folder.uri;
-            _savedPosition = savedPosition;
-            await _prefs!.setString('folderUri', folder.uri);
-            await _loadFolder(folder, restoring: true);
-            return;
-          }
-        } catch (_) {
-          // Try the next persisted candidate, if any.
-        }
+      if (candidates.isNotEmpty) {
+        _savedPosition = savedPosition;
+        await _loadFolders(candidates, restoring: true);
+        return;
       }
 
       if (mounted) {
         setState(() {
           _loading = false;
-          _error = readGrants.isEmpty
+          _error = readableUris.isEmpty
               ? 'اختَر مجلد الفيديوهات للبدء.'
-              : 'تعذر فتح المجلد المحفوظ. اختَر المجلد مرة أخرى.';
+              : 'تعذر فتح المجلدات المحفوظة. اختَر المجلدات مرة أخرى.';
         });
       }
     } catch (e) {
@@ -176,15 +171,25 @@ class _VideoHomePageState extends State<VideoHomePage>
     try {
       final folder = await _saf.pickDirectory(persistablePermission: true);
       if (folder == null) return;
-      await _loadFolder(folder);
+
+      // Save the grant and its position immediately, even if the folder
+      // currently contains no supported videos.
+      if (!_folderUris.contains(folder.uri)) {
+        _folderUris.add(folder.uri);
+      }
+      _folderUri = folder.uri;
+      await _prefs?.setStringList('folderUris', _folderUris);
+      await _prefs?.setString('folderUri', folder.uri);
+
+      await _loadFolders(List<String>.from(_folderUris));
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = 'تعذر اختيار المجلد: $e');
     }
   }
 
-  Future<void> _loadFolder(
-    SafDocumentFile folder, {
+  Future<void> _loadFolders(
+    List<String> folderUris, {
     bool restoring = false,
   }) async {
     setState(() {
@@ -194,26 +199,48 @@ class _VideoHomePageState extends State<VideoHomePage>
 
     try {
       final foundVideos = <SafDocumentFile>[];
+      final validUris = <String>[];
 
-      await for (final entry in _saf.walk(folder.uri)) {
-        final file = entry.file;
-        if (file.isDir) continue;
+      // Walk folders in the exact order they were first selected.
+      for (final uri in folderUris) {
+        try {
+          final folder = await _saf.stat(uri);
+          if (folder == null || !folder.isDir) continue;
+          validUris.add(folder.uri);
 
-        final extension = file.name.contains('.')
-            ? file.name.split('.').last.toLowerCase()
-            : '';
+          await for (final entry in _saf.walk(folder.uri)) {
+            final file = entry.file;
+            if (file.isDir) continue;
 
-        if (_extensions.contains(extension)) {
-          foundVideos.add(file);
+            final extension = file.name.contains('.')
+                ? file.name.split('.').last.toLowerCase()
+                : '';
+
+            if (_extensions.contains(extension) &&
+                !foundVideos.any((v) => v.uri == file.uri)) {
+              foundVideos.add(file);
+            }
+          }
+        } catch (_) {
+          // Keep processing the remaining selected folders.
         }
       }
 
       if (!mounted) return;
 
+      _folderUris
+        ..clear()
+        ..addAll(validUris);
+      _folderUri = validUris.isEmpty ? null : validUris.first;
+      await _prefs?.setStringList('folderUris', _folderUris);
+      if (_folderUri != null) {
+        await _prefs?.setString('folderUri', _folderUri!);
+      }
+
       if (foundVideos.isEmpty) {
         setState(() {
           _loading = false;
-          _error = 'لم يتم العثور على فيديوهات داخل هذا المجلد.';
+          _error = 'لم يتم العثور على فيديوهات داخل المجلدات المختارة.';
         });
         return;
       }
@@ -224,16 +251,11 @@ class _VideoHomePageState extends State<VideoHomePage>
         ..clear()
         ..addAll(foundVideos);
 
-      _folderUri = folder.uri;
-      await _prefs?.setString('folderUri', folder.uri);
-
       int startIndex = 0;
-
       if (restoring && _lastVideoUri != null) {
         final foundIndex = foundVideos.indexWhere(
           (v) => v.uri == _lastVideoUri,
         );
-
         if (foundIndex >= 0) {
           startIndex = foundIndex;
           _showResumePrompt = _savedPosition > 0;
@@ -260,7 +282,7 @@ class _VideoHomePageState extends State<VideoHomePage>
       if (!mounted) return;
       setState(() {
         _loading = false;
-        _error = 'تعذر قراءة المجلد: $e';
+        _error = 'تعذر قراءة المجلدات: $e';
       });
     }
   }
@@ -829,7 +851,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                     ListTile(
                       contentPadding: EdgeInsets.zero,
                       leading: const Icon(Icons.folder_open),
-                      title: const Text('تغيير مجلد الفيديوهات'),
+                      title: const Text('إضافة مجلد فيديوهات'),
                       onTap: () {
                         Navigator.pop(sheetContext);
                         _pickFolder();
