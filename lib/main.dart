@@ -71,6 +71,8 @@ class _VideoHomePageState extends State<VideoHomePage>
   String? _folderUri;
   final List<String> _folderUris = [];
   String? _lastVideoUri;
+  String? _lastVideoName;
+  Future<void>? _pendingLifecycleSave;
 
   DateTime _lastProgressSave =
       DateTime.fromMillisecondsSinceEpoch(0);
@@ -108,6 +110,7 @@ class _VideoHomePageState extends State<VideoHomePage>
         ..addAll(_prefs!.getStringList('folderUris') ??
             (_folderUri == null ? <String>[] : <String>[_folderUri!]));
       _lastVideoUri = _prefs!.getString('lastVideoUri');
+      _lastVideoName = _prefs!.getString('lastVideoName');
 
       final savedPosition = _prefs!.getDouble('lastPosition') ?? 0;
 
@@ -183,6 +186,22 @@ class _VideoHomePageState extends State<VideoHomePage>
   bool _resumeAfterLifecycle = false;
   bool _wasPlayingBeforeBackground = false;
   bool _reopeningAfterLifecycle = false;
+
+  Future<void> _restoreVideoAfterLifecycle() async {
+    try {
+      await _pendingLifecycleSave;
+      if (!mounted || _videos.isEmpty) return;
+      final index = _currentIndex.clamp(0, _videos.length - 1);
+      await _openVideo(
+        index,
+        resumeAt: Duration(milliseconds: _savedPosition.toInt()),
+        autoplayAfterOpen: _wasPlayingBeforeBackground,
+      );
+    } finally {
+      _pendingLifecycleSave = null;
+      _reopeningAfterLifecycle = false;
+    }
+  }
 
   Future<void> _pickFolder() async {
     if (_loading) return;
@@ -271,18 +290,26 @@ class _VideoHomePageState extends State<VideoHomePage>
         ..addAll(foundVideos);
 
       int startIndex = 0;
-      if (restoring && _lastVideoUri != null) {
-        final foundIndex = foundVideos.indexWhere(
-          (v) => v.uri == _lastVideoUri,
-        );
+      if (restoring && (_lastVideoUri != null || _lastVideoName != null)) {
+        // URI values may be normalized by Android's document provider after
+        // relaunch. Match the exact saved URI first, then the saved filename.
+        var foundIndex = _lastVideoUri == null
+            ? -1
+            : foundVideos.indexWhere((v) => v.uri == _lastVideoUri);
+        if (foundIndex < 0 && _lastVideoName != null) {
+          foundIndex = foundVideos.indexWhere((v) => v.name == _lastVideoName);
+        }
         if (foundIndex >= 0) {
           startIndex = foundIndex;
+          _lastVideoUri = foundVideos[foundIndex].uri;
+          _lastVideoName = foundVideos[foundIndex].name;
           _showResumePrompt = _savedPosition > 0;
         }
       } else {
         _lastVideoUri = null;
         _savedPosition = 0;
         await _prefs?.remove('lastVideoUri');
+        await _prefs?.remove('lastVideoName');
         await _prefs?.setDouble('lastPosition', 0);
       }
 
@@ -497,10 +524,12 @@ class _VideoHomePageState extends State<VideoHomePage>
     }
 
     _lastVideoUri = _videos[_currentIndex].uri;
+    _lastVideoName = _videos[_currentIndex].name;
     _savedPosition =
         controller.value.position.inMilliseconds.toDouble();
 
     await _prefs?.setString('lastVideoUri', _lastVideoUri!);
+    await _prefs?.setString('lastVideoName', _lastVideoName!);
     await _prefs?.setDouble('lastPosition', _savedPosition);
   }
 
@@ -911,20 +940,9 @@ class _VideoHomePageState extends State<VideoHomePage>
           controller.value.isInitialized &&
           controller.value.isPlaying;
 
-      if (_savePosition &&
-          controller != null &&
-          controller.value.isInitialized &&
-          _videos.isNotEmpty &&
-          _currentIndex >= 0 &&
-          _currentIndex < _videos.length) {
-        _lastVideoUri = _videos[_currentIndex].uri;
-        _savedPosition =
-            controller.value.position.inMilliseconds.toDouble();
-        _prefs?.setString('lastVideoUri', _lastVideoUri!);
-        _prefs?.setDouble('lastPosition', _savedPosition);
-      }
-
       _resumeAfterLifecycle = true;
+      // Persist the exact playback state before the engine is suspended.
+      _pendingLifecycleSave = _saveProgress();
       if (_wasPlayingBeforeBackground) {
         controller?.pause();
       }
@@ -940,16 +958,7 @@ class _VideoHomePageState extends State<VideoHomePage>
         _currentIndex < _videos.length) {
       _resumeAfterLifecycle = false;
       _reopeningAfterLifecycle = true;
-      final index = _currentIndex;
-      final position = Duration(milliseconds: _savedPosition.toInt());
-      final shouldPlay = _wasPlayingBeforeBackground;
-      _openVideo(
-        index,
-        resumeAt: position,
-        autoplayAfterOpen: shouldPlay,
-      ).whenComplete(() {
-        _reopeningAfterLifecycle = false;
-      });
+      _restoreVideoAfterLifecycle();
     }
   }
 
@@ -1031,7 +1040,10 @@ class _VideoHomePageState extends State<VideoHomePage>
                                   child: SizedBox(
                                     width: size.width,
                                     height: size.height,
-                                    child: VideoPlayer(controller),
+                                    child: VideoPlayer(
+                                      controller,
+                                      key: ValueKey(controller.hashCode),
+                                    ),
                                   ),
                                 ),
                               ),
