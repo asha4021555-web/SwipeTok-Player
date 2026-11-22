@@ -319,7 +319,12 @@ class _VideoHomePageState extends State<VideoHomePage>
         _error = null;
       });
 
-      if (_pageController.hasClients) {
+      // The first load replaces the empty-state widget with PageView.
+      // At this point PageController may not be attached yet, so an
+      // immediate jumpToPage can be silently skipped and leave page 0
+      // visible while the controller plays the restored video at startIndex.
+      await WidgetsBinding.instance.endOfFrame;
+      if (mounted && _pageController.hasClients) {
         _pageController.jumpToPage(startIndex);
       }
 
