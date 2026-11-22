@@ -276,6 +276,17 @@ class _VideoHomePageState extends State<VideoHomePage>
       }
 
       if (foundVideos.isEmpty) {
+        await _disposeCurrentVideo();
+        _videos.clear();
+        _currentIndex = 0;
+        _savedPosition = 0;
+        _lastVideoUri = null;
+        _lastVideoName = null;
+        _showResumePrompt = false;
+        await _prefs?.remove('lastVideoUri');
+        await _prefs?.remove('lastVideoName');
+        await _prefs?.setDouble('lastPosition', 0);
+        if (!mounted) return;
         setState(() {
           _loading = false;
           _error = 'لم يتم العثور على فيديوهات داخل المجلدات المختارة.';
@@ -758,6 +769,175 @@ class _VideoHomePageState extends State<VideoHomePage>
     setState(() => _locked = false);
   }
 
+  Future<void> _removeVideoFolder(String uri) async {
+    if (_loading) return;
+
+    final remaining = List<String>.from(_folderUris)..remove(uri);
+    _folderUris
+      ..clear()
+      ..addAll(remaining);
+    _folderUri = remaining.isEmpty ? null : remaining.first;
+
+    await _prefs?.setStringList('folderUris', remaining);
+    if (_folderUri == null) {
+      await _prefs?.remove('folderUri');
+    } else {
+      await _prefs?.setString('folderUri', _folderUri!);
+    }
+
+    if (remaining.isEmpty) {
+      await _clearVideoFolders();
+    } else {
+      await _loadFolders(remaining);
+    }
+  }
+
+  Future<void> _clearVideoFolders() async {
+    ++_openRequest;
+    await _disposeCurrentVideo();
+    _videos.clear();
+    _currentIndex = 0;
+    _savedPosition = 0;
+    _lastVideoUri = null;
+    _lastVideoName = null;
+    _showResumePrompt = false;
+    await _prefs?.remove('folderUri');
+    await _prefs?.remove('lastVideoUri');
+    await _prefs?.remove('lastVideoName');
+    await _prefs?.setStringList('folderUris', <String>[]);
+    await _prefs?.setDouble('lastPosition', 0);
+
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = 'اختَر مجلد الفيديوهات للبدء.';
+    });
+  }
+
+  Future<void> _showFolderManager() async {
+    if (_locked || _isPipMode || _loading) return;
+
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: const Color(0xFF202020),
+      isScrollControlled: true,
+      builder: (sheetContext) => StatefulBuilder(
+        builder: (context, setSheetState) => SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text(
+                  'إدارة مجلدات الفيديو',
+                  style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                ),
+                const SizedBox(height: 8),
+                if (_folderUris.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.all(16),
+                    child: Text('لا توجد مجلدات مضافة حاليًا.'),
+                  )
+                else
+                  Flexible(
+                    child: ListView(
+                      shrinkWrap: true,
+                      children: [
+                        for (var i = 0; i < _folderUris.length; i++)
+                          ListTile(
+                            leading: const Icon(Icons.folder, color: Colors.white70),
+                            title: Text('مجلد الفيديوهات ${i + 1}'),
+                            subtitle: Text(
+                              Uri.decodeComponent(_folderUris[i].split('/').last),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: IconButton(
+                              tooltip: 'إزالة هذا المجلد',
+                              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                              onPressed: () async {
+                                final uri = _folderUris[i];
+                                final confirmed = await showDialog<bool>(
+                                  context: sheetContext,
+                                  builder: (dialogContext) => AlertDialog(
+                                    title: const Text('إزالة المجلد؟'),
+                                    content: const Text(
+                                      'سيتم إزالة المجلد من قائمة التطبيق فقط، ولن تُحذف الفيديوهات من الهاتف.',
+                                    ),
+                                    actions: [
+                                      TextButton(
+                                        onPressed: () => Navigator.pop(dialogContext, false),
+                                        child: const Text('إلغاء'),
+                                      ),
+                                      FilledButton(
+                                        onPressed: () => Navigator.pop(dialogContext, true),
+                                        child: const Text('إزالة'),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                                if (confirmed != true || !mounted) return;
+                                await _removeVideoFolder(uri);
+                                if (mounted) setSheetState(() {});
+                              },
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                if (_folderUris.isNotEmpty)
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      icon: const Icon(Icons.delete_sweep_outlined),
+                      label: const Text('حذف كل المجلدات'),
+                      onPressed: () async {
+                        final confirmed = await showDialog<bool>(
+                          context: sheetContext,
+                          builder: (dialogContext) => AlertDialog(
+                            title: const Text('حذف كل المجلدات؟'),
+                            content: const Text(
+                              'سيتم إزالة جميع المجلدات من التطبيق فقط، ولن تُحذف أي فيديوهات أصلية من الهاتف.',
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(dialogContext, false),
+                                child: const Text('إلغاء'),
+                              ),
+                              FilledButton(
+                                onPressed: () => Navigator.pop(dialogContext, true),
+                                child: const Text('حذف الكل'),
+                              ),
+                            ],
+                          ),
+                        );
+                        if (confirmed != true || !mounted) return;
+                        await _clearVideoFolders();
+                        if (mounted) setSheetState(() {});
+                      },
+                    ),
+                  ),
+                const SizedBox(height: 8),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    icon: const Icon(Icons.create_new_folder_outlined),
+                    label: const Text('إضافة مجلد جديد'),
+                    onPressed: () {
+                      Navigator.pop(sheetContext);
+                      _pickFolder();
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Future<void> _openSettings() async {
     if (_locked || _isPipMode) return;
 
@@ -912,6 +1092,16 @@ class _VideoHomePageState extends State<VideoHomePage>
                       onTap: () {
                         Navigator.pop(sheetContext);
                         _pickFolder();
+                      },
+                    ),
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      leading: const Icon(Icons.folder_copy_outlined),
+                      title: const Text('إدارة المجلدات المضافة'),
+                      subtitle: Text('${_folderUris.length} مجلدات مضافة'),
+                      onTap: () {
+                        Navigator.pop(sheetContext);
+                        _showFolderManager();
                       },
                     ),
                     const Divider(),
