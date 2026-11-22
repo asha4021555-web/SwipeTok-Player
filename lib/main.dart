@@ -796,6 +796,8 @@ class _VideoHomePageState extends State<VideoHomePage>
     ++_openRequest;
     await _disposeCurrentVideo();
     _videos.clear();
+    _folderUris.clear();
+    _folderUri = null;
     _currentIndex = 0;
     _savedPosition = 0;
     _lastVideoUri = null;
@@ -839,10 +841,9 @@ class _VideoHomePageState extends State<VideoHomePage>
                     child: Text('لا توجد مجلدات مضافة حاليًا.'),
                   )
                 else
-                  Flexible(
-                    child: ListView(
-                      shrinkWrap: true,
-                      children: [
+                  ListView(
+                    shrinkWrap: true,
+                    children: [
                         for (var i = 0; i < _folderUris.length; i++)
                           ListTile(
                             leading: const Icon(Icons.folder, color: Colors.white70),
@@ -882,8 +883,7 @@ class _VideoHomePageState extends State<VideoHomePage>
                               },
                             ),
                           ),
-                      ],
-                    ),
+                    ],
                   ),
                 const SizedBox(height: 8),
                 if (_folderUris.isNotEmpty)
