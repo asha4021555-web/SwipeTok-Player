@@ -138,6 +138,23 @@ class _VideoHomePageState extends State<VideoHomePage>
         candidates.add(_folderUri!);
       }
 
+      // Some Android document providers return a normalized tree URI
+      // in persisted permissions that differs from the URI originally saved
+      // by the picker. If exact matching fails, recover readable directory
+      // grants directly instead of forcing the user to pick folders again.
+      if (candidates.isEmpty && readableUris.isNotEmpty) {
+        for (final uri in readableUris) {
+          try {
+            final folder = await _saf.stat(uri);
+            if (folder != null && folder.isDir) {
+              candidates.add(folder.uri);
+            }
+          } catch (_) {
+            // Ignore stale or inaccessible grants and keep checking.
+          }
+        }
+      }
+
       if (candidates.isNotEmpty) {
         _savedPosition = savedPosition;
         await _loadFolders(candidates, restoring: true);
@@ -1264,6 +1281,19 @@ class _MusicLibraryPageState extends State<MusicLibraryPage> {
       final permissions = await _saf.persistedPermissions();
       final readable = permissions.where((p) => p.read).map((p) => p.uri).toSet();
       final valid = _folderUris.where(readable.contains).toList();
+
+      // Recover provider-normalized persisted URIs when they no longer
+      // exactly match the strings stored by the folder picker.
+      if (valid.isEmpty && readable.isNotEmpty) {
+        for (final uri in readable) {
+          try {
+            final folder = await _saf.stat(uri);
+            if (folder != null && folder.isDir) valid.add(folder.uri);
+          } catch (_) {
+            // Ignore stale or inaccessible grants.
+          }
+        }
+      }
       await _loadMusicFolders(valid, restoring: true);
     } catch (e) {
       if (mounted) setState(() { _loading = false; _message = 'تعذر استعادة مجلدات الموسيقى: $e'; });
