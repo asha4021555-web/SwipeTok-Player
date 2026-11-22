@@ -191,7 +191,7 @@ class _VideoHomePageState extends State<VideoHomePage>
     try {
       await _pendingLifecycleSave;
       if (!mounted || _videos.isEmpty) return;
-      final index = _currentIndex.clamp(0, _videos.length - 1);
+      final index = _currentIndex.clamp(0, _videos.length - 1).toInt();
       await _openVideo(
         index,
         resumeAt: Duration(milliseconds: _savedPosition.toInt()),
