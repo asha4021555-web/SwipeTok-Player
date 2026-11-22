@@ -180,6 +180,9 @@ class _VideoHomePageState extends State<VideoHomePage>
   }
 
   double _savedPosition = 0;
+  bool _resumeAfterLifecycle = false;
+  bool _wasPlayingBeforeBackground = false;
+  bool _reopeningAfterLifecycle = false;
 
   Future<void> _pickFolder() async {
     if (_loading) return;
@@ -320,7 +323,11 @@ class _VideoHomePageState extends State<VideoHomePage>
     }
   }
 
-  Future<void> _openVideo(int index) async {
+  Future<void> _openVideo(
+    int index, {
+    Duration? resumeAt,
+    bool autoplayAfterOpen = true,
+  }) async {
     if (index < 0 || index >= _videos.length) return;
 
     final request = ++_openRequest;
@@ -384,7 +391,14 @@ class _VideoHomePageState extends State<VideoHomePage>
         _showResumePrompt = false;
         await _askResume(controller);
       } else {
-        await controller.play();
+        if (resumeAt != null) {
+          final duration = controller.value.duration;
+          final target = resumeAt > duration ? duration : resumeAt;
+          await controller.seekTo(target);
+        }
+        if (autoplayAfterOpen) {
+          await controller.play();
+        }
       }
     } catch (e) {
       if (!mounted || request != _openRequest) return;
@@ -885,10 +899,57 @@ class _VideoHomePageState extends State<VideoHomePage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.inactive) {
+      // Do not tear down the video for temporary system overlays.
+      return;
+    }
+
     if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
         state == AppLifecycleState.detached) {
-      _saveProgress();
+      final controller = _controller;
+      _wasPlayingBeforeBackground = controller != null &&
+          controller.value.isInitialized &&
+          controller.value.isPlaying;
+
+      if (_savePosition &&
+          controller != null &&
+          controller.value.isInitialized &&
+          _videos.isNotEmpty &&
+          _currentIndex >= 0 &&
+          _currentIndex < _videos.length) {
+        _lastVideoUri = _videos[_currentIndex].uri;
+        _savedPosition =
+            controller.value.position.inMilliseconds.toDouble();
+        _prefs?.setString('lastVideoUri', _lastVideoUri!);
+        _prefs?.setDouble('lastPosition', _savedPosition);
+      }
+
+      _resumeAfterLifecycle = true;
+      if (_wasPlayingBeforeBackground) {
+        controller?.pause();
+      }
+      return;
+    }
+
+    if (state == AppLifecycleState.resumed &&
+        _resumeAfterLifecycle &&
+        !_reopeningAfterLifecycle &&
+        mounted &&
+        _videos.isNotEmpty &&
+        _currentIndex >= 0 &&
+        _currentIndex < _videos.length) {
+      _resumeAfterLifecycle = false;
+      _reopeningAfterLifecycle = true;
+      final index = _currentIndex;
+      final position = Duration(milliseconds: _savedPosition.toInt());
+      final shouldPlay = _wasPlayingBeforeBackground;
+      _openVideo(
+        index,
+        resumeAt: position,
+        autoplayAfterOpen: shouldPlay,
+      ).whenComplete(() {
+        _reopeningAfterLifecycle = false;
+      });
     }
   }
 
